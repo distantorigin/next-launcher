@@ -55,9 +55,9 @@ var upToDateSound []byte
 //go:embed sounds/select.wav
 var selectSound []byte
 
-var _ embed.FS // Force embed package usage
-
 var (
+	_ embed.FS // Ensure embed package is recognized by compiler
+
 	speakerInitialized bool
 	speakerMutex       sync.Mutex
 	backgroundVolume   *effects.Volume
@@ -473,19 +473,6 @@ func (v Version) String() string {
 	return ver
 }
 
-// FullString returns the complete version with all metadata
-func (v Version) FullString() string {
-	ver := v.String()
-	if v.Date != "" {
-		ver += fmt.Sprintf(" [%s]", v.Date)
-	}
-	return ver
-}
-
-func getBranch() string {
-	return "main"
-}
-
 func getLatestCommit(ref string) (*GitHubCommit, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits/%s", githubOwner, githubRepo, ref)
 	resp, err := httpClient.Get(url)
@@ -881,22 +868,6 @@ func denormalizePath(p string) string {
 	return strings.ReplaceAll(p, "/", string(filepath.Separator))
 }
 
-// Git hashes files as: "blob " + size + "\0" + content
-func calculateGitSHA(filePath string) (string, error) {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return "", err
-	}
-
-	// Git blob format: "blob <size>\0<content>"
-	header := fmt.Sprintf("blob %d\x00", len(data))
-	hash := sha1.New()
-	hash.Write([]byte(header))
-	hash.Write(data)
-
-	return fmt.Sprintf("%x", hash.Sum(nil)), nil
-}
-
 func isUserConfigFile(path string) bool {
 	normalizedPath := strings.ToLower(normalizePath(path))
 
@@ -939,27 +910,6 @@ type UpdateResult struct {
 	FilesAdded   []string `json:"files_added,omitempty"` // Array of added/updated file paths
 	FilesDeleted []string `json:"files_deleted,omitempty"` // Array of deleted file paths
 	Restarted    bool     `json:"restarted"`     // Whether MUSHclient was restarted
-}
-
-func writeUpdateFailure(errorMsg string) error {
-	baseDir, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-
-	result := UpdateResult{
-		Result:    "failure",
-		Message:   errorMsg,
-		Restarted: false,
-	}
-
-	jsonData, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal update result: %w", err)
-	}
-
-	resultPath := filepath.Join(baseDir, ".update-result")
-	return os.WriteFile(resultPath, append(jsonData, '\n'), 0644)
 }
 
 func writeUpdateSuccess(updates []FileInfo, deletedFiles []string, wasRestarted bool) error {
@@ -1068,36 +1018,6 @@ func getConsoleWindow() uintptr {
 
 	consoleWindowHandle, _, _ := syscall.Syscall(getConsoleWindowProc, 0, 0, 0, 0)
 	return consoleWindowHandle
-}
-
-// hideConsoleWindow closes the console window so user doesn't see it
-func hideConsoleWindow() {
-	kernel32, err := syscall.LoadLibrary("kernel32.dll")
-	if err != nil {
-		return
-	}
-	defer syscall.FreeLibrary(kernel32)
-
-	user32, err := syscall.LoadLibrary("user32.dll")
-	if err != nil {
-		return
-	}
-	defer syscall.FreeLibrary(user32)
-
-	getConsoleWindowProc, err := syscall.GetProcAddress(kernel32, "GetConsoleWindow")
-	if err != nil {
-		return
-	}
-
-	showWindowProc, err := syscall.GetProcAddress(user32, "ShowWindow")
-	if err != nil {
-		return
-	}
-
-	consoleWindowHandle, _, _ := syscall.Syscall(getConsoleWindowProc, 0, 0, 0, 0)
-	if consoleWindowHandle != 0 {
-		syscall.Syscall(showWindowProc, 2, consoleWindowHandle, 0, 0)
-	}
 }
 
 func main() {
@@ -1774,11 +1694,8 @@ func main() {
 		showChangelog(updates, deletedFiles)
 	}
 
-	// After update, restart MUSHclient if we killed it, or if it was already running and needs restart
-	wasRunning := isMUSHClientRunning()
-	shouldRestart := mushWasRunning || (manifestNeedsRestart() && wasRunning)
-
-	if shouldRestart || mushWasRunning {
+	// After update, restart MUSHclient if we killed it
+	if mushWasRunning {
 		logProgress("Restarting MUSHclient...")
 		if err := launchMUSHClient(); err != nil {
 			logProgress("Warning: failed to restart MUSHclient: %v", err)
@@ -1791,7 +1708,7 @@ func main() {
 				fmt.Println("MUSHclient restarted.")
 			}
 		}
-	} else if !wasRunning && !mushWasRunning {
+	} else if !mushWasRunning {
 		// Launch MUSHclient if it wasn't running before
 		if err := launchMUSHClient(); err != nil {
 			if !nonInteractive {
@@ -1809,10 +1726,9 @@ func main() {
 
 	// Write .update-result file in non-interactive mode
 	if nonInteractive {
-		wasRestarted := shouldRestart || mushWasRunning
-		if err := writeUpdateSuccess(updates, deletedFiles, wasRestarted); err != nil {
+		if err := writeUpdateSuccess(updates, deletedFiles, mushWasRunning); err != nil {
 			logProgress("Warning: failed to write .update-result: %v", err)
-		}	
+		}
 	}
 }
 	
@@ -1889,7 +1805,7 @@ func main() {
 		}
 
 		data, err := io.ReadAll(binaryResp.Body)
-		if err != nil || len(data) < 1000 {
+		if err != nil {
 			return nil
 		}
 
@@ -2699,15 +2615,6 @@ func saveManifest() error {
 	return nil
 }
 
-func manifestNeedsRestart() bool {
-	manifest, err := loadLocalManifest()
-	if err != nil {
-		return false
-	}
-	_, ok := manifest["needs_restart"]
-	return ok
-}
-
 // ------------------------
 // INSTALLATION
 // ------------------------
@@ -3243,32 +3150,6 @@ func launchMUSHClient() error {
 
 	if err := exec.Command(exePath).Start(); err != nil {
 		return fmt.Errorf("failed to launch MUSHclient: %w", err)
-	}
-
-	return nil
-}
-
-func restartMUSHClient() error {
-	// Kill existing process
-	if err := exec.Command("taskkill", "/IM", "MUSHclient.exe", "/F").Run(); err != nil {
-		// It's okay if the process doesn't exist
-		if !strings.Contains(err.Error(), "exit status 128") {
-			log.Printf("warning: failed to kill MUSHclient: %v", err)
-		}
-	}
-
-	baseDir, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("failed to get working directory: %w", err)
-	}
-
-	exePath := filepath.Join(baseDir, "MUSHclient.exe")
-	if _, err := os.Stat(exePath); err != nil {
-		return fmt.Errorf("MUSHclient.exe not found: %w", err)
-	}
-
-	if err := exec.Command(exePath).Start(); err != nil {
-		return fmt.Errorf("failed to restart MUSHclient: %w", err)
 	}
 
 	return nil
@@ -4311,24 +4192,6 @@ func hashFile(path string) (string, error) {
 	}
 
 	return fmt.Sprintf("%x", hash.Sum(nil)), nil
-}
-
-// copyFile copies a file from src to dst
-func copyFile(src, dst string) error {
-	source, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer source.Close()
-
-	destination, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer destination.Close()
-
-	_, err = io.Copy(destination, source)
-	return err
 }
 
 func createDesktopIcon(targetDir string) error {
