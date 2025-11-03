@@ -827,6 +827,20 @@ func getLatestTag() (string, error) {
 	return tagName, nil
 }
 
+func getZipURLForChannel() (string, error) {
+	if channelFlag == "stable" {
+		tag, err := getLatestTag()
+		if err != nil {
+			return "", fmt.Errorf("failed to get latest tag: %w", err)
+		}
+		return fmt.Sprintf("%s/archive/refs/tags/%s.zip", baseURL, tag), nil
+	} else if channelFlag == "dev" {
+		return fmt.Sprintf("%s/archive/refs/heads/main.zip", baseURL), nil
+	}
+	// For custom branches
+	return fmt.Sprintf("%s/archive/refs/heads/%s.zip", baseURL, channelFlag), nil
+}
+
 func getGitHubTree(ref string) (*GitHubTree, error) {
 	// Get tree recursively
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/git/trees/%s?recursive=1",
@@ -2413,21 +2427,9 @@ func downloadAndExtractZip(zipURL string, targetDir string, isInstall bool, file
 }
 
 func downloadZipAndExtract(updates []FileInfo) error {
-	var zipURL string
-
-	if channelFlag == "stable" {
-		// For stable, use the tag archive
-		tag, err := getLatestTag()
-		if err != nil {
-			return fmt.Errorf("failed to get latest tag: %w", err)
-		}
-		zipURL = fmt.Sprintf("%s/archive/refs/tags/%s.zip", baseURL, tag)
-	} else if channelFlag == "dev" {
-		// For dev, use main branch archive (latest commit)
-		zipURL = fmt.Sprintf("%s/archive/refs/heads/main.zip", baseURL)
-	} else {
-		// For custom branches, use the branch archive
-		zipURL = fmt.Sprintf("%s/archive/refs/heads/%s.zip", baseURL, channelFlag)
+	zipURL, err := getZipURLForChannel()
+	if err != nil {
+		return err
 	}
 
 	baseDir, err := os.Getwd()
@@ -2689,25 +2691,18 @@ func handleInstallation() (string, error) {
 	}
 
 	// Get the appropriate zipball
-	var zipURL string
-	if channelFlag == "stable" {
-		tag, err := getLatestTag()
-		if err != nil {
-			return "", fmt.Errorf("failed to get latest tag: %w", err)
-		}
-		zipURL = fmt.Sprintf("%s/archive/refs/tags/%s.zip", baseURL, tag)
-		if !quietFlag && verboseFlag {
+	zipURL, err := getZipURLForChannel()
+	if err != nil {
+		return "", err
+	}
+
+	if !quietFlag && verboseFlag {
+		if channelFlag == "stable" {
+			tag, _ := getLatestTag()
 			fmt.Printf("Installing from tag: %s\n", tag)
-		}
-	} else if channelFlag == "dev" {
-		zipURL = fmt.Sprintf("%s/archive/refs/heads/main.zip", baseURL)
-		if !quietFlag && verboseFlag {
+		} else if channelFlag == "dev" {
 			fmt.Println("Installing from main branch (latest commit)")
-		}
-	} else {
-		// For custom branches
-		zipURL = fmt.Sprintf("%s/archive/refs/heads/%s.zip", baseURL, channelFlag)
-		if !quietFlag && verboseFlag {
+		} else {
 			fmt.Printf("Installing from experimental branch: %s\n", channelFlag)
 		}
 	}
@@ -4078,17 +4073,9 @@ func handleToastushMigration(toastushDir string) error {
 	}
 
 	// Get the appropriate zipball
-	var zipURL string
-	if channelFlag == "stable" {
-		tag, err := getLatestTag()
-		if err != nil {
-			return fmt.Errorf("failed to get latest tag: %w", err)
-		}
-		zipURL = fmt.Sprintf("%s/archive/refs/tags/%s.zip", baseURL, tag)
-	} else if channelFlag == "dev" {
-		zipURL = fmt.Sprintf("%s/archive/refs/heads/main.zip", baseURL)
-	} else {
-		zipURL = fmt.Sprintf("%s/archive/refs/heads/%s.zip", baseURL, channelFlag)
+	zipURL, err := getZipURLForChannel()
+	if err != nil {
+		return err
 	}
 
 	// Download and extract (as fresh install to replace all files, no file filter = extract all)
