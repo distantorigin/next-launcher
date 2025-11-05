@@ -85,6 +85,38 @@ const (
 	SW_MAXIMIZE           = 3
 )
 
+func ensureSpeakerInitialized(format beep.Format) {
+	speakerMutex.Lock()
+	defer speakerMutex.Unlock()
+
+	if !speakerInitialized {
+		if verboseFlag {
+			log.Println("Setting up audio...")
+		}
+		speaker.Init(format.SampleRate, format.SampleRate.N(time.Second/10))
+		speakerInitialized = true
+	}
+}
+
+func decodeSoundData(soundData []byte) (beep.StreamSeekCloser, beep.Format, error) {
+	if len(soundData) == 0 {
+		if verboseFlag {
+			log.Println("Couldn't play sound (no data)")
+		}
+		return nil, beep.Format{}, fmt.Errorf("no sound data")
+	}
+
+	streamer, format, err := wav.Decode(bytes.NewReader(soundData))
+	if err != nil {
+		if verboseFlag {
+			log.Println("Sound file couldn't be decoded:", err)
+		}
+		return nil, beep.Format{}, err
+	}
+
+	return streamer, format, nil
+}
+
 // initConsole tries to show a console window for output. If we're running from
 // a command line, it attaches to the parent console. Otherwise, it creates a new one.
 func initConsole() bool {
@@ -143,31 +175,13 @@ func playSound(soundData []byte) {
 		return
 	}
 
-	if len(soundData) == 0 {
-		if verboseFlag {
-			log.Println("Couldn't play sound (no data)")
-		}
-		return
-	}
-
-	streamer, format, err := wav.Decode(bytes.NewReader(soundData))
+	streamer, format, err := decodeSoundData(soundData)
 	if err != nil {
-		if verboseFlag {
-			log.Println("Sound file couldn't be decoded:", err)
-		}
 		return
 	}
 	defer streamer.Close()
 
-	speakerMutex.Lock()
-	if !speakerInitialized {
-		if verboseFlag {
-			log.Println("Setting up audio...")
-		}
-		speaker.Init(format.SampleRate, format.SampleRate.N(time.Second/10))
-		speakerInitialized = true
-	}
-	speakerMutex.Unlock()
+	ensureSpeakerInitialized(format)
 
 	done := make(chan bool)
 	speaker.Play(beep.Seq(streamer, beep.Callback(func() {
@@ -199,30 +213,12 @@ func playSoundAsyncLoop(soundData []byte, volumeDB float64, loop bool) {
 		return
 	}
 
-	if len(soundData) == 0 {
-		if verboseFlag {
-			log.Println("Couldn't play sound (no data)")
-		}
-		return
-	}
-
-	streamer, format, err := wav.Decode(bytes.NewReader(soundData))
+	streamer, format, err := decodeSoundData(soundData)
 	if err != nil {
-		if verboseFlag {
-			log.Println("Sound file couldn't be decoded:", err)
-		}
 		return
 	}
 
-	speakerMutex.Lock()
-	if !speakerInitialized {
-		if verboseFlag {
-			log.Println("Setting up audio...")
-		}
-		speaker.Init(format.SampleRate, format.SampleRate.N(time.Second/10))
-		speakerInitialized = true
-	}
-	speakerMutex.Unlock()
+	ensureSpeakerInitialized(format)
 
 	// Loop the sound if requested (for background music)
 	var finalStreamer beep.Streamer = streamer
@@ -262,31 +258,13 @@ func playSoundWithDucking(soundData []byte, foregroundVolumeDB float64) {
 		return
 	}
 
-	if len(soundData) == 0 {
-		if verboseFlag {
-			log.Println("Couldn't play sound (no data)")
-		}
-		return
-	}
-
-	streamer, format, err := wav.Decode(bytes.NewReader(soundData))
+	streamer, format, err := decodeSoundData(soundData)
 	if err != nil {
-		if verboseFlag {
-			log.Println("Sound file couldn't be decoded:", err)
-		}
 		return
 	}
 	defer streamer.Close()
 
-	speakerMutex.Lock()
-	if !speakerInitialized {
-		if verboseFlag {
-			log.Println("Setting up audio...")
-		}
-		speaker.Init(format.SampleRate, format.SampleRate.N(time.Second/10))
-		speakerInitialized = true
-	}
-	speakerMutex.Unlock()
+	ensureSpeakerInitialized(format)
 
 	// Lower the background sound so the foreground sound is more audible
 	backgroundMutex.Lock()
