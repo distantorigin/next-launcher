@@ -3734,6 +3734,29 @@ func promptForBranch() string {
 	}
 }
 
+func parseVersionFromTag(tag string) (major, minor, patch int, err error) {
+	tagVersion := strings.TrimPrefix(tag, "v")
+	parts := strings.Split(tagVersion, ".")
+	if len(parts) != 3 {
+		return 0, 0, 0, fmt.Errorf("invalid tag format: %s (expected vX.Y.Z)", tag)
+	}
+
+	major, err = strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("invalid major version in tag %s: %w", tag, err)
+	}
+	minor, err = strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("invalid minor version in tag %s: %w", tag, err)
+	}
+	patch, err = strconv.Atoi(parts[2])
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("invalid patch version in tag %s: %w", tag, err)
+	}
+
+	return major, minor, patch, nil
+}
+
 func getLatestVersion() (*Version, error) {
 	var version Version
 
@@ -3744,24 +3767,9 @@ func getLatestVersion() (*Version, error) {
 			return nil, fmt.Errorf("failed to get latest tag: %w", err)
 		}
 
-		// Parse version from tag (e.g., "v1.2.3" -> 1.2.3)
-		tagVersion := strings.TrimPrefix(tag, "v")
-		parts := strings.Split(tagVersion, ".")
-		if len(parts) != 3 {
-			return nil, fmt.Errorf("invalid tag format: %s (expected vX.Y.Z)", tag)
-		}
-
-		major, err := strconv.Atoi(parts[0])
+		major, minor, patch, err := parseVersionFromTag(tag)
 		if err != nil {
-			return nil, fmt.Errorf("invalid major version in tag %s: %w", tag, err)
-		}
-		minor, err := strconv.Atoi(parts[1])
-		if err != nil {
-			return nil, fmt.Errorf("invalid minor version in tag %s: %w", tag, err)
-		}
-		patch, err := strconv.Atoi(parts[2])
-		if err != nil {
-			return nil, fmt.Errorf("invalid patch version in tag %s: %w", tag, err)
+			return nil, err
 		}
 
 		version.Major = major
@@ -3778,25 +3786,14 @@ func getLatestVersion() (*Version, error) {
 			version.Minor = 0
 			version.Patch = 0
 		} else {
-			// Parse version from tag (e.g., "v1.2.3" -> 1.2.3)
-			tagVersion := strings.TrimPrefix(tag, "v")
-			parts := strings.Split(tagVersion, ".")
-			if len(parts) == 3 {
-				major, err1 := strconv.Atoi(parts[0])
-				minor, err2 := strconv.Atoi(parts[1])
-				patch, err3 := strconv.Atoi(parts[2])
-				if err1 == nil && err2 == nil && err3 == nil {
-					version.Major = major
-					version.Minor = minor
-					version.Patch = patch
-				} else {
-					// Fall back to 0.0.0 if parsing fails
-					version.Major = 0
-					version.Minor = 0
-					version.Patch = 0
-				}
+			// Try to parse version from tag, fall back to 0.0.0 on error
+			major, minor, patch, err := parseVersionFromTag(tag)
+			if err == nil {
+				version.Major = major
+				version.Minor = minor
+				version.Patch = patch
 			} else {
-				// Fall back to 0.0.0 if tag format is unexpected
+				// Fall back to 0.0.0 if parsing fails
 				version.Major = 0
 				version.Minor = 0
 				version.Patch = 0
@@ -3867,6 +3864,26 @@ func detectToastushInstallation() string {
 	}
 
 	return ""
+}
+
+func getDesktopPath() (string, error) {
+	userProfile := os.Getenv("USERPROFILE")
+	if userProfile == "" {
+		return "", fmt.Errorf("failed to get user profile directory")
+	}
+
+	desktops := []string{
+		filepath.Join(userProfile, "Desktop"),
+		filepath.Join(userProfile, "OneDrive", "Desktop"),
+	}
+
+	for _, desktop := range desktops {
+		if _, err := os.Stat(desktop); err == nil {
+			return desktop, nil
+		}
+	}
+
+	return "", fmt.Errorf("desktop directory not found")
 }
 
 // checkDesktopShortcut checks for a desktop shortcut and returns its target path
@@ -4163,20 +4180,10 @@ func createDesktopIcon(targetDir string) error {
 	}
 	defer shell.Release()
 
-	// Get desktop path using SHGetFolderPath approach
-	userProfile := os.Getenv("USERPROFILE")
-	if userProfile == "" {
-		return fmt.Errorf("failed to get user profile directory")
-	}
-	desktop := filepath.Join(userProfile, "Desktop")
-
-	// Verify desktop directory exists
-	if _, err := os.Stat(desktop); os.IsNotExist(err) {
-		// Try alternate location
-		desktop = filepath.Join(userProfile, "OneDrive", "Desktop")
-		if _, err := os.Stat(desktop); os.IsNotExist(err) {
-			return fmt.Errorf("desktop directory not found")
-		}
+	// Get desktop path
+	desktop, err := getDesktopPath()
+	if err != nil {
+		return err
 	}
 
 	linkPath := filepath.Join(desktop, "Miriani-Next.lnk")
