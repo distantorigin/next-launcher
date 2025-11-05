@@ -2922,7 +2922,7 @@ func isProxianiRunning() bool {
 	return false
 }
 
-func updateWorldFileForProxiani(worldFilePath string) error {
+func updateWorldFile(worldFilePath string, updatePort bool) error {
 	data, err := os.ReadFile(worldFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to read world file: %w", err)
@@ -2932,6 +2932,11 @@ func updateWorldFileForProxiani(worldFilePath string) error {
 
 	// Replace toastsoft.net with localhost in the site attribute
 	updatedContent := strings.ReplaceAll(content, `site="toastsoft.net"`, `site="localhost"`)
+
+	// Update port to 7788 for MUDMixer if requested
+	if updatePort {
+		updatedContent = strings.ReplaceAll(updatedContent, `port="1234"`, `port="7788"`)
+	}
 
 	// Check if anything was actually changed
 	if updatedContent == content {
@@ -2944,6 +2949,10 @@ func updateWorldFileForProxiani(worldFilePath string) error {
 	}
 
 	return nil
+}
+
+func updateWorldFileForProxiani(worldFilePath string) error {
+	return updateWorldFile(worldFilePath, false)
 }
 
 // ------------------------
@@ -2969,30 +2978,7 @@ func isMUDMixerRunning() bool {
 }
 
 func updateWorldFileForMUDMixer(worldFilePath string) error {
-	data, err := os.ReadFile(worldFilePath)
-	if err != nil {
-		return fmt.Errorf("failed to read world file: %w", err)
-	}
-
-	content := string(data)
-
-	// Replace toastsoft.net with localhost in the site attribute
-	updatedContent := strings.ReplaceAll(content, `site="toastsoft.net"`, `site="localhost"`)
-
-	// Also update port to 7788 for MUDMixer (from default 1234)
-	updatedContent = strings.ReplaceAll(updatedContent, `port="1234"`, `port="7788"`)
-
-	// Check if anything was actually changed
-	if updatedContent == content {
-		return fmt.Errorf("no toastsoft.net references found in world file")
-	}
-
-	// Write back to file
-	if err := os.WriteFile(worldFilePath, []byte(updatedContent), 0644); err != nil {
-		return fmt.Errorf("failed to write world file: %w", err)
-	}
-
-	return nil
+	return updateWorldFile(worldFilePath, true)
 }
 
 func isInstalled() bool {
