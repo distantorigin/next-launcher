@@ -1940,12 +1940,12 @@ func printCheckOutput(updates []FileInfo, deletedFiles []string) {
 	localVer, localErr := getLocalVersion()
 
 	if nonInteractive {
-if !isInstalled() {
+		if !isInstalled() {
 			fmt.Println("Update available: Unknown")
 			fmt.Println("Status: Not installed")
-}else if !isValidChannel(channelFlag) {
-fmt.Println("Status: channel invalid")
-	} else if hasUpdates {
+		} else if !isValidChannel(channelFlag) {
+			fmt.Println("Status: channel invalid")
+		} else if hasUpdates {
 			fmt.Println("Update available: Yes")
 			if err == nil {
 				fmt.Printf("Version: %s\n", latestVer.String())
