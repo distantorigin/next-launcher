@@ -2633,7 +2633,7 @@ func handleInstallation() (string, error) {
 	fmt.Printf("\nThis will install the %s version to: %s\n", channelFlag, installDir)
 
 	// Check if MUSHclient is running before installation
-	if isMUSHClientRunning() {
+	if isMUSHClientRunningInDir(installDir) {
 		if nonInteractive {
 			// In non-interactive mode, kill MUSHclient before installing
 			logProgress("MUSHclient is running. Killing MUSHclient before installation...")
@@ -3060,14 +3060,8 @@ func needsToUpdateMUSHClientExe(updates []FileInfo) bool {
 	return false
 }
 
-func isMUSHClientRunning() bool {
-	baseDir, err := os.Getwd()
-	if err != nil {
-		return false
-	}
-
-	// Get the expected full path to MUSHclient.exe in this directory
-	expectedPath := filepath.Join(baseDir, "MUSHclient.exe")
+func isMUSHClientRunningInDir(targetDir string) bool {
+	expectedPath := filepath.Join(targetDir, "MUSHclient.exe")
 	expectedPath = strings.ToLower(filepath.Clean(expectedPath))
 
 	// Use WMIC to get all running MUSHclient.exe processes with their full paths
@@ -3086,7 +3080,7 @@ func isMUSHClientRunning() bool {
 			processPath := strings.TrimPrefix(line, "ExecutablePath=")
 			processPath = strings.ToLower(filepath.Clean(processPath))
 
-			// Check if this MUSHclient.exe is running from our directory
+			// Check if this MUSHclient.exe is running from the target directory
 			if processPath == expectedPath {
 				return true
 			}
@@ -3094,6 +3088,14 @@ func isMUSHClientRunning() bool {
 	}
 
 	return false
+}
+
+func isMUSHClientRunning() bool {
+	baseDir, err := os.Getwd()
+	if err != nil {
+		return false
+	}
+	return isMUSHClientRunningInDir(baseDir)
 }
 
 func launchMUSHClient() error {
@@ -3993,7 +3995,7 @@ func handleToastushMigration(toastushDir string) error {
 	fmt.Printf("\nMigrating Toastush installation from: %s\n", toastushDir)
 
 	// Check if MUSHclient is running before we do anything
-	if isMUSHClientRunning() {
+	if isMUSHClientRunningInDir(toastushDir) {
 		if nonInteractive {
 			logProgress("MUSHclient is running. Killing MUSHclient before migration...")
 			if err := exec.Command("taskkill", "/IM", "MUSHclient.exe", "/F").Run(); err != nil {
