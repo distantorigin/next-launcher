@@ -31,6 +31,76 @@ import (
 	"github.com/gopxl/beep/wav"
 )
 
+// ============================================================================
+// FUNCTION INDEX
+// ============================================================================
+// This file contains the entire updater application logic (~4200 lines).
+// Use this index to navigate to major sections:
+//
+// 1. AUDIO/SOUND SYSTEM
+//    - ensureSpeakerInitialized, decodeSoundData, playSound, stopAllSounds,
+//      playSoundAsync, playSoundAsyncLoop, playSoundWithDucking
+//
+// 2. CONSOLE/UI
+//    - initConsole, logProgress, setConsoleTitle, getConsoleWindow,
+//      waitForUser, confirmAction
+//
+// 3. GITHUB API
+//    - getLatestCommit, compareCommits, getLastCommitDate, validateChannelSwitch,
+//      getCommitsSinceLastUpdate, formatCommitAsCliffNote, generateCliffNotes,
+//      getLatestTag, getZipURLForChannel, getGitHubTree, getRawURLForTag
+//
+// 4. MANIFEST MANAGEMENT
+//    - loadLocalManifest, loadRemoteManifest, shouldExcludeFromManifest,
+//      saveManifest
+//
+// 5. UPDATE OPERATIONS
+//    - getPendingUpdates, printCheckOutput, performUpdates, downloadFile,
+//      downloadAndExtractZip, downloadZipAndExtract
+//
+// 6. INSTALLATION
+//    - handleInstallation, copyUpdaterToInstallation
+//
+// 7. PROCESS DETECTION
+//    - isProxianiRunning, isMUDMixerRunning, isMUSHClientRunningInDir,
+//      isMUSHClientRunning
+//
+// 8. WORLD FILE UPDATES
+//    - updateWorldFile, updateWorldFileForProxiani, updateWorldFileForMUDMixer
+//
+// 9. VERSION MANAGEMENT
+//    - parseVersionFromTag, getLatestVersion, getLocalVersion
+//
+// 10. CHANNEL MANAGEMENT
+//     - saveChannel, loadChannel, isValidChannel, promptForChannel,
+//       promptForBranch
+//
+// 11. INSTALLATION DETECTION
+//     - isInstalled, hasWorldFilesInCurrentDir, detectToastushInstallation,
+//       getDesktopPath, checkDesktopShortcut, getShortcutTarget
+//
+// 12. FILE OPERATIONS
+//     - normalizePath, denormalizePath, isUserConfigFile, loadExcludes,
+//       matchesExclusionPattern, moveToOldFolder, cleanOldFolder, hashFile
+//
+// 13. PROMPTING/MENUS
+//     - promptForInstallFolder, promptInstallationMenu
+//
+// 14. CHANGELOG/RELEASE NOTES
+//     - buildChangelog, showChangelog
+//
+// 15. MIGRATION
+//     - handleToastushMigration
+//
+// 16. MISCELLANEOUS
+//     - needsToUpdateMUSHClientExe, launchMUSHClient,
+//       createChannelSwitchBatchFiles, fatalError, createUpdaterExcludes,
+//       findActualPath, writeUpdateSuccess
+//
+// 17. MAIN
+//     - main (primary entry point)
+// ============================================================================
+
 //go:embed sounds/error.wav
 var errorSound []byte
 
@@ -58,8 +128,9 @@ var selectSound []byte
 var (
 	_ embed.FS // Ensure embed package is recognized by compiler
 
-	speakerInitialized bool
-	speakerMutex       sync.Mutex
+	speakerOnce        sync.Once
+	speakerReady       bool // Set to true after speaker is initialized (thread-safe via sync.Once)
+	speakerFormat      beep.Format // Store the format for later use
 	backgroundVolume   *effects.Volume
 	backgroundMutex    sync.Mutex
 )
@@ -85,17 +156,19 @@ const (
 	SW_MAXIMIZE           = 3
 )
 
-func ensureSpeakerInitialized(format beep.Format) {
-	speakerMutex.Lock()
-	defer speakerMutex.Unlock()
+// ============================================================================
+// SECTION 1: AUDIO/SOUND SYSTEM
+// ============================================================================
 
-	if !speakerInitialized {
+func ensureSpeakerInitialized(format beep.Format) {
+	speakerOnce.Do(func() {
 		if verboseFlag {
 			log.Println("Setting up audio...")
 		}
 		speaker.Init(format.SampleRate, format.SampleRate.N(time.Second/10))
-		speakerInitialized = true
-	}
+		speakerFormat = format // Store for potential future use
+		speakerReady = true   // Mark as initialized (thread-safe within sync.Once)
+	})
 }
 
 func decodeSoundData(soundData []byte) (beep.StreamSeekCloser, beep.Format, error) {
@@ -116,6 +189,10 @@ func decodeSoundData(soundData []byte) (beep.StreamSeekCloser, beep.Format, erro
 
 	return streamer, format, nil
 }
+
+// ============================================================================
+// SECTION 2: CONSOLE/UI
+// ============================================================================
 
 // initConsole tries to show a console window for output. If we're running from
 // a command line, it attaches to the parent console. Otherwise, it creates a new one.
@@ -198,7 +275,7 @@ func playSound(soundData []byte) {
 }
 
 func stopAllSounds() {
-	if !speakerInitialized {
+	if !speakerReady {
 		return
 	}
 	speaker.Clear()
@@ -450,6 +527,10 @@ func (v Version) String() string {
 	}
 	return ver
 }
+
+// ============================================================================
+// SECTION 3: GITHUB API
+// ============================================================================
 
 func getLatestCommit(ref string) (*GitHubCommit, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits/%s", githubOwner, githubRepo, ref)
@@ -852,6 +933,10 @@ func getRawURLForTag(tag string, path string) string {
 		githubOwner, githubRepo, tag, path)
 }
 
+// ============================================================================
+// SECTION 12: FILE OPERATIONS
+// ============================================================================
+
 func normalizePath(p string) string {
 	return strings.ReplaceAll(filepath.Clean(p), string(filepath.Separator), "/")
 }
@@ -1011,6 +1096,10 @@ func getConsoleWindow() uintptr {
 	consoleWindowHandle, _, _ := syscall.Syscall(getConsoleWindowProc, 0, 0, 0, 0)
 	return consoleWindowHandle
 }
+
+// ============================================================================
+// SECTION 17: MAIN
+// ============================================================================
 
 func main() {
 	// Global panic handler to prevent path leakage in error messages
@@ -1848,10 +1937,11 @@ func main() {
 
 		return nil
 	}
-	
-// ------------------------
-// UPDATES
-// ------------------------
+
+// ============================================================================
+// SECTION 5: UPDATE OPERATIONS
+// ============================================================================
+
 func getPendingUpdates() ([]FileInfo, []string, error) {
 	localManifest, err := loadLocalManifest()
 	if err != nil {
@@ -2425,9 +2515,10 @@ func downloadZipAndExtract(updates []FileInfo) error {
 	return saveManifest()
 }
 
-// ------------------------
-// MANIFEST
-// ------------------------
+// ============================================================================
+// SECTION 4: MANIFEST MANAGEMENT
+// ============================================================================
+
 func loadLocalManifest() (map[string]FileInfo, error) {
 	baseDir, err := os.Getwd()
 	if err != nil {
@@ -2595,9 +2686,10 @@ func saveManifest() error {
 	return nil
 }
 
-// ------------------------
-// INSTALLATION
-// ------------------------
+// ============================================================================
+// SECTION 6: INSTALLATION
+// ============================================================================
+
 func handleInstallation() (string, error) {
 	// Determine default installation directory
 	usr, err := os.UserHomeDir()
@@ -2888,9 +2980,10 @@ func copyUpdaterToInstallation(installDir string) error {
 	return nil
 }
 
-// ------------------------
-// PROXIANI DETECTION
-// ------------------------
+// ============================================================================
+// SECTION 7: PROCESS DETECTION
+// ============================================================================
+
 func isProxianiRunning() bool {
 	// Check if node.exe is running
 	cmd := exec.Command("tasklist", "/FI", "IMAGENAME eq node.exe", "/FO", "CSV", "/NH")
@@ -2921,6 +3014,10 @@ func isProxianiRunning() bool {
 
 	return false
 }
+
+// ============================================================================
+// SECTION 8: WORLD FILE UPDATES
+// ============================================================================
 
 func updateWorldFile(worldFilePath string, updatePort bool) error {
 	data, err := os.ReadFile(worldFilePath)
@@ -2980,6 +3077,10 @@ func isMUDMixerRunning() bool {
 func updateWorldFileForMUDMixer(worldFilePath string) error {
 	return updateWorldFile(worldFilePath, true)
 }
+
+// ============================================================================
+// SECTION 11: INSTALLATION DETECTION
+// ============================================================================
 
 func isInstalled() bool {
 	baseDir, err := os.Getwd()
@@ -3050,6 +3151,10 @@ func hasWorldFilesInCurrentDir() bool {
 
 	return false
 }
+
+// ============================================================================
+// SECTION 16: MISCELLANEOUS
+// ============================================================================
 
 func needsToUpdateMUSHClientExe(updates []FileInfo) bool {
 	for _, file := range updates {
@@ -3288,10 +3393,10 @@ func createUpdaterExcludes() error {
 	return os.WriteFile(excludesPath, []byte(content.String()), 0644)
 }
 
-// ------------------------
-// ------------------------
+// ============================================================================
+// SECTION 14: CHANGELOG/RELEASE NOTES
+// ============================================================================
 
-// buildChangelog creates the changelog content string
 func buildChangelog(updates []FileInfo, deletedFiles []string) string {
 	var changelog strings.Builder
 	totalChanges := len(updates) + len(deletedFiles)
@@ -3383,7 +3488,10 @@ func waitForUser(prompt string) {
 	bufio.NewReader(os.Stdin).ReadBytes('\n')
 }
 
-// promptForInstallFolder shows a folder selection dialog using Windows COM APIs
+// ============================================================================
+// SECTION 13: PROMPTING/MENUS
+// ============================================================================
+
 func promptForInstallFolder(defaultPath string) (string, error) {
 	if nonInteractive {
 		return defaultPath, nil
@@ -3510,7 +3618,10 @@ func getBranches() ([]Branch, error) {
 	return branches, nil
 }
 
-// saveChannel saves the selected channel to .update-channel file
+// ============================================================================
+// SECTION 10: CHANNEL MANAGEMENT
+// ============================================================================
+
 func saveChannel(channel string) error {
 	baseDir, err := os.Getwd()
 	if err != nil {
@@ -3736,6 +3847,10 @@ func promptForBranch() string {
 	}
 }
 
+// ============================================================================
+// SECTION 9: VERSION MANAGEMENT
+// ============================================================================
+
 func parseVersionFromTag(tag string) (major, minor, patch int, err error) {
 	tagVersion := strings.TrimPrefix(tag, "v")
 	parts := strings.Split(tagVersion, ".")
@@ -3953,7 +4068,10 @@ func getShortcutTarget(linkPath string) string {
 	return target.ToString()
 }
 
-// handleToastushMigration migrates a Toastush installation to Miriani-Next
+// ============================================================================
+// SECTION 15: MIGRATION
+// ============================================================================
+
 func handleToastushMigration(toastushDir string) error {
 	// If we didn't auto-detect an installation, prompt for the directory
 	if toastushDir == "" {
