@@ -417,7 +417,20 @@ const (
 	channelFile    = ".update-channel"
 	zipThreshold   = 30
 	fileWorkers    = 6
-	title = "Miriani"
+	title          = "Miriani"
+
+	// World file and directory names
+	worldFileName = "miriani.mcl"
+	worldsDir     = "worlds"
+	worldFileExt  = ".mcl"
+
+	// Server addresses
+	defaultServer = "toastsoft.net"
+	localServer   = "localhost"
+
+	// Port numbers for Proxiani and MUDMixer
+	proxianiPort = "1234"
+	mudMixerPort = "7788"
 
 	// Default Toastush miriani.mcl SHA1 hash (unmodified version)
 	defaultToastushMCLHash = "57b5a6a2ace40a151fe3f1e1eddd029189ff9097"
@@ -961,7 +974,7 @@ func isUserConfigFile(path string) bool {
 	}
 
 	// .mcl files in worlds directory
-	if strings.HasPrefix(normalizedPath, "worlds/") && strings.HasSuffix(normalizedPath, ".mcl") {
+	if strings.HasPrefix(normalizedPath, worldsDir+"/") && strings.HasSuffix(normalizedPath, worldFileExt) {
 		return true
 	} else if strings.HasPrefix(normalizedPath, "worlds/plugins/state/") {
 		return true
@@ -2642,7 +2655,7 @@ func shouldExcludeFromManifest(path string) bool {
 	}
 
 	// Exclude .mcl files in worlds directory (user configuration files)
-	if strings.HasPrefix(normalizedPath, "worlds/") && strings.HasSuffix(normalizedPath, ".mcl") {
+	if strings.HasPrefix(normalizedPath, worldsDir+"/") && strings.HasSuffix(normalizedPath, worldFileExt) {
 		return true
 	}
 
@@ -2854,15 +2867,15 @@ func handleInstallation() (string, error) {
 			fmt.Println("\nMUDMixer detected!")
 			fmt.Println("MUDMixer is a local proxy server that can provide additional features.")
 			fmt.Println("Would you like to configure Miriani-Next to connect through MUDMixer?")
-			fmt.Println("(This changes the connection from toastsoft.net to localhost:7788)")
+			fmt.Println("(This changes the connection from "+defaultServer+" to "+localServer+":"+mudMixerPort+")")
 
 			if confirmAction("Configure Miriani to use MUDMixer?") {
-				worldFilePath := filepath.Join(installDir, "worlds", "miriani.mcl")
+				worldFilePath := filepath.Join(installDir, worldsDir, worldFileName)
 				if err := updateWorldFileForMUDMixer(worldFilePath); err != nil {
 					fmt.Printf("Warning: failed to update world file for MUDMixer: %v\n", err)
 				} else {
 					fmt.Println("World file updated successfully!")
-					fmt.Println("Miriani-Next will now connect through MUDMixer (localhost:7788)")
+					fmt.Println("Miriani-Next will now connect through MUDMixer ("+localServer+":"+mudMixerPort+")")
 				}
 			} else {
 				fmt.Println("Skipping MUDMixer configuration. You can manually change this later.")
@@ -2875,15 +2888,15 @@ func handleInstallation() (string, error) {
 			fmt.Println("\nProxiani detected!")
 			fmt.Println("Proxiani is a local proxy server that can provide additional features.")
 			fmt.Println("Would you like to configure Miriani-Next to connect through Proxiani?")
-			fmt.Println("(This changes the connection from toastsoft.net to localhost:1234)")
+			fmt.Println("(This changes the connection from "+defaultServer+" to "+localServer+":"+proxianiPort+")")
 
 			if confirmAction("Configure Miriani to use Proxiani?") {
-				worldFilePath := filepath.Join(installDir, "worlds", "miriani.mcl")
+				worldFilePath := filepath.Join(installDir, worldsDir, worldFileName)
 				if err := updateWorldFileForProxiani(worldFilePath); err != nil {
 					fmt.Printf("Warning: failed to update world file for Proxiani: %v\n", err)
 				} else {
 					fmt.Println("World file updated successfully!")
-					fmt.Println("Miriani-Next will now connect through Proxiani (localhost:1234)")
+					fmt.Println("Miriani-Next will now connect through Proxiani ("+localServer+":"+proxianiPort+")")
 				}
 			} else {
 				fmt.Println("Skipping Proxiani configuration. You can manually change this later.")
@@ -2893,7 +2906,7 @@ func handleInstallation() (string, error) {
 		// In non-interactive mode, auto-configure (prioritize MUDMixer)
 		if mudmixerDetected {
 			logProgress("MUDMixer detected! Auto-configuring world file...")
-			worldFilePath := filepath.Join(installDir, "worlds", "miriani.mcl")
+			worldFilePath := filepath.Join(installDir, worldsDir, worldFileName)
 			if err := updateWorldFileForMUDMixer(worldFilePath); err != nil {
 				logProgress("Warning: failed to update world file for MUDMixer: %v", err)
 			} else {
@@ -2901,7 +2914,7 @@ func handleInstallation() (string, error) {
 			}
 		} else if proxianiDetected {
 			logProgress("Proxiani detected! Auto-configuring world file...")
-			worldFilePath := filepath.Join(installDir, "worlds", "miriani.mcl")
+			worldFilePath := filepath.Join(installDir, worldsDir, worldFileName)
 			if err := updateWorldFileForProxiani(worldFilePath); err != nil {
 				logProgress("Warning: failed to update world file for Proxiani: %v", err)
 			} else {
@@ -3007,7 +3020,7 @@ func isProxianiRunning() bool {
 	// Look for port 1234 listening
 	lines := strings.Split(string(output), "\n")
 	for _, line := range lines {
-		if strings.Contains(line, ":1234") && strings.Contains(line, "LISTENING") {
+		if strings.Contains(line, ":"+proxianiPort) && strings.Contains(line, "LISTENING") {
 			return true
 		}
 	}
@@ -3028,16 +3041,16 @@ func updateWorldFile(worldFilePath string, updatePort bool) error {
 	content := string(data)
 
 	// Replace toastsoft.net with localhost in the site attribute
-	updatedContent := strings.ReplaceAll(content, `site="toastsoft.net"`, `site="localhost"`)
+	updatedContent := strings.ReplaceAll(content, `site="`+defaultServer+`"`, `site="`+localServer+`"`)
 
 	// Update port to 7788 for MUDMixer if requested
 	if updatePort {
-		updatedContent = strings.ReplaceAll(updatedContent, `port="1234"`, `port="7788"`)
+		updatedContent = strings.ReplaceAll(updatedContent, `port="`+proxianiPort+`"`, `port="`+mudMixerPort+`"`)
 	}
 
 	// Check if anything was actually changed
 	if updatedContent == content {
-		return fmt.Errorf("no toastsoft.net references found in world file")
+		return fmt.Errorf("no "+defaultServer+" references found in world file")
 	}
 
 	// Write back to file
@@ -3066,7 +3079,7 @@ func isMUDMixerRunning() bool {
 	// Look for port 7788 listening
 	lines := strings.Split(string(output), "\n")
 	for _, line := range lines {
-		if strings.Contains(line, ":7788") && strings.Contains(line, "LISTENING") {
+		if strings.Contains(line, ":"+mudMixerPort) && strings.Contains(line, "LISTENING") {
 			return true
 		}
 	}
@@ -3144,7 +3157,7 @@ func hasWorldFilesInCurrentDir() bool {
 	}
 
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), ".mcl") {
+		if !entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), worldFileExt) {
 			return true
 		}
 	}
@@ -3246,7 +3259,7 @@ func loadExcludes() map[string]struct{} {
 	return excludes
 }
 
-// Supports wildcards like "worlds/*.mcl"
+// Supports wildcards like worldsDir+"/*."+worldFileExt[1:]
 func matchesExclusionPattern(path string, excludes map[string]struct{}) bool {
 	normalizedPath := strings.ToLower(normalizePath(path))
 
@@ -4147,7 +4160,7 @@ func handleToastushMigration(toastushDir string) error {
 	}
 
 	// Check if miriani.mcl has been modified from default
-	worldFile := filepath.Join(toastushDir, "worlds", "miriani.mcl")
+	worldFile := filepath.Join(toastushDir, worldsDir, worldFileName)
 	mclModified := false
 	if hash, err := hashFile(worldFile); err == nil {
 		if hash != defaultToastushMCLHash {
