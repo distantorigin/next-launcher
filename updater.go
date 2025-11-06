@@ -29,6 +29,9 @@ import (
 	"github.com/gopxl/beep/effects"
 	"github.com/gopxl/beep/speaker"
 	"github.com/gopxl/beep/wav"
+
+	"updater/internal/github"
+	"updater/internal/manifest"
 )
 
 // ============================================================================
@@ -441,6 +444,10 @@ var (
 	baseURL string
 	// httpClient with connection pooling and timeouts
 	httpClient *http.Client
+	// ghClient is the GitHub API client
+	ghClient *github.Client
+	// manifestManager handles manifest operations
+	manifestManager *manifest.Manager
 )
 
 var (
@@ -460,76 +467,12 @@ var (
 // ErrUserCancelled is returned when the user cancels an operation
 var ErrUserCancelled = fmt.Errorf("operation cancelled by user")
 
-type FileInfo struct {
-	Name string `json:"name"`
-	Hash string `json:"hash"`
-	URL  string `json:"url"`
-}
-
-type Version struct {
+type Version struct{
 	Major  int    `json:"major"`
 	Minor  int    `json:"minor"`
 	Patch  int    `json:"patch"`
 	Commit string `json:"commit,omitempty"`
 	Date   string `json:"date,omitempty"`
-}
-
-type GitHubRelease struct {
-	TagName string `json:"tag_name"`
-	Name    string `json:"name"`
-	ZipURL  string `json:"zipball_url"`
-}
-
-type GitHubRef struct {
-	Ref    string         `json:"ref"`
-	NodeID string         `json:"node_id"`
-	URL    string         `json:"url"`
-	Object GitHubRefObject `json:"object"`
-}
-
-type GitHubRefObject struct {
-	SHA  string `json:"sha"`
-	Type string `json:"type"`
-	URL  string `json:"url"`
-}
-
-type GitHubTree struct {
-	SHA  string          `json:"sha"`
-	URL  string          `json:"url"`
-	Tree []GitHubTreeItem `json:"tree"`
-}
-
-type GitHubTreeItem struct {
-	Path string `json:"path"`
-	Mode string `json:"mode"`
-	Type string `json:"type"`
-	SHA  string `json:"sha"`
-	Size int    `json:"size,omitempty"`
-	URL  string `json:"url"`
-}
-
-type GitHubCommit struct {
-	SHA    string            `json:"sha"`
-	Commit GitHubCommitInner `json:"commit"`
-}
-
-type GitHubCommitInner struct {
-	Author    GitHubCommitAuthor `json:"author"`
-	Committer GitHubCommitAuthor `json:"committer"`
-	Message   string             `json:"message"`
-}
-
-type GitHubCommitAuthor struct {
-	Name  string `json:"name"`
-	Email string `json:"email"`
-	Date  string `json:"date"`
-}
-
-type GitHubComparison struct {
-	AheadBy  int              `json:"ahead_by"`
-	BehindBy int              `json:"behind_by"`
-	Status   string           `json:"status"`
-	Commits  []GitHubCommit   `json:"commits"`
 }
 
 // Returns the version in semantic format as a string
@@ -545,86 +488,24 @@ func (v Version) String() string {
 // SECTION 3: GITHUB API
 // ============================================================================
 
-func getLatestCommit(ref string) (*GitHubCommit, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits/%s", githubOwner, githubRepo, ref)
-	resp, err := httpClient.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch commit: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to fetch commit: HTTP %d", resp.StatusCode)
-	}
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read commit data: %w", err)
-	}
-
-	var commit GitHubCommit
-	if err := json.Unmarshal(data, &commit); err != nil {
-		return nil, fmt.Errorf("failed to parse commit data: %w", err)
-	}
-
-	return &commit, nil
+func getLatestCommit(ref string) (*github.Commit, error) {
+	return ghClient.GetLatestCommit(ref)
 }
 
-// compareCommits tells us how many commits apart two branches are (who's ahead, who's behind)
-func compareCommits(base, head string) (*GitHubComparison, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/compare/%s...%s",
-		githubOwner, githubRepo, base, head)
-	resp, err := httpClient.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("failed to compare commits: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to compare commits: HTTP %d", resp.StatusCode)
-	}
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read comparison data: %w", err)
-	}
-
-	var comparison GitHubComparison
-	if err := json.Unmarshal(data, &comparison); err != nil {
-		return nil, fmt.Errorf("failed to parse comparison data: %w", err)
-	}
-
-	return &comparison, nil
+func compareCommits(base, head string) (*github.Comparison, error) {
+	return ghClient.CompareCommits(base, head)
 }
 
-// getLastCommitDate fetches the last commit date for a branch or tag
 func getLastCommitDate(ref string) (string, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits/%s",
-		githubOwner, githubRepo, ref)
-	resp, err := httpClient.Get(url)
+	dateStr, err := ghClient.GetLastCommitDate(ref)
 	if err != nil {
-		return "", fmt.Errorf("failed to get commit info: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("failed to get commit info: HTTP %d", resp.StatusCode)
-	}
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read commit data: %w", err)
-	}
-
-	var commit GitHubCommit
-	if err := json.Unmarshal(data, &commit); err != nil {
-		return "", fmt.Errorf("failed to parse commit data: %w", err)
+		return "", err
 	}
 
 	// Parse and format the date
-	t, err := time.Parse(time.RFC3339, commit.Commit.Author.Date)
+	t, err := time.Parse(time.RFC3339, dateStr)
 	if err != nil {
-		return commit.Commit.Author.Date, nil // Return raw if parsing fails
+		return dateStr, nil // Return raw if parsing fails
 	}
 
 	return t.Format("Jan 2, 2006"), nil
@@ -759,7 +640,7 @@ func validateChannelSwitch(fromChannel, toChannel string) error {
 	return nil
 }
 
-func getCommitsSinceLastUpdate() ([]GitHubCommit, error) {
+func getCommitsSinceLastUpdate() ([]github.Commit, error) {
 	localVer, err := getLocalVersion()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get local version: %w", err)
@@ -801,7 +682,7 @@ func getCommitsSinceLastUpdate() ([]GitHubCommit, error) {
 			return nil, fmt.Errorf("failed to read commits: %w", err)
 		}
 
-		var commits []GitHubCommit
+		var commits []github.Commit
 		if err := json.Unmarshal(data, &commits); err != nil {
 			return nil, fmt.Errorf("failed to parse commits: %w", err)
 		}
@@ -820,7 +701,7 @@ func getCommitsSinceLastUpdate() ([]GitHubCommit, error) {
 
 // formatCommitAsCliffNote formats a commit message as a cliff note
 // Extracts the first line and removes common prefixes/patterns
-func formatCommitAsCliffNote(commit GitHubCommit) string {
+func formatCommitAsCliffNote(commit github.Commit) string {
 	// Get first line of commit message
 	message := commit.Commit.Message
 	lines := strings.Split(message, "\n")
@@ -847,7 +728,7 @@ func formatCommitAsCliffNote(commit GitHubCommit) string {
 	return fmt.Sprintf("* %s (Commit %s)", firstLine, shortSHA)
 }
 
-func generateCliffNotes(commits []GitHubCommit) string {
+func generateCliffNotes(commits []github.Commit) string {
 	if len(commits) == 0 {
 		return ""
 	}
@@ -866,37 +747,7 @@ func generateCliffNotes(commits []GitHubCommit) string {
 }
 
 func getLatestTag() (string, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/git/refs/tags", githubOwner, githubRepo)
-	resp, err := httpClient.Get(url)
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch tags: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("failed to fetch tags: HTTP %d", resp.StatusCode)
-	}
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read tags data: %w", err)
-	}
-
-	var refs []GitHubRef
-	if err := json.Unmarshal(data, &refs); err != nil {
-		return "", fmt.Errorf("failed to parse tags data: %w", err)
-	}
-
-	if len(refs) == 0 {
-		return "", fmt.Errorf("no tags found in repository")
-	}
-
-	// Get the last tag (most recent)
-	lastRef := refs[len(refs)-1]
-	// Extract tag name from ref (refs/tags/v1.0.0 -> v1.0.0)
-	tagName := strings.TrimPrefix(lastRef.Ref, "refs/tags/")
-
-	return tagName, nil
+	return ghClient.GetLatestTag()
 }
 
 func getZipURLForChannel() (string, error) {
@@ -913,37 +764,12 @@ func getZipURLForChannel() (string, error) {
 	return fmt.Sprintf("%s/archive/refs/heads/%s.zip", baseURL, channelFlag), nil
 }
 
-func getGitHubTree(ref string) (*GitHubTree, error) {
-	// Get tree recursively
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/git/trees/%s?recursive=1",
-		githubOwner, githubRepo, ref)
-
-	resp, err := httpClient.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch tree: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to fetch tree: HTTP %d", resp.StatusCode)
-	}
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read tree data: %w", err)
-	}
-
-	var tree GitHubTree
-	if err := json.Unmarshal(data, &tree); err != nil {
-		return nil, fmt.Errorf("failed to parse tree data: %w", err)
-	}
-
-	return &tree, nil
+func getGitHubTree(ref string) (*github.Tree, error) {
+	return ghClient.GetTree(ref)
 }
 
 func getRawURLForTag(tag string, path string) string {
-	return fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s",
-		githubOwner, githubRepo, tag, path)
+	return ghClient.GetRawURL(tag, path)
 }
 
 // ============================================================================
@@ -1002,7 +828,7 @@ type UpdateResult struct {
 	Restarted    bool     `json:"restarted"`     // Whether MUSHclient was restarted
 }
 
-func writeUpdateSuccess(updates []FileInfo, deletedFiles []string, wasRestarted bool) error {
+func writeUpdateSuccess(updates []manifest.FileInfo, deletedFiles []string, wasRestarted bool) error {
 	baseDir, err := os.Getwd()
 	if err != nil {
 		return err
@@ -1244,6 +1070,19 @@ func main() {
 			DisableCompression:  true, // Required for GitHub archive downloads (already compressed)
 		},
 	}
+
+	// Initialize GitHub API client
+	ghClient = github.NewClient(githubOwner, githubRepo, httpClient)
+
+	// Initialize manifest manager
+	manifestManager = manifest.NewManager(manifest.Config{
+		ManifestFile: manifestFile,
+		WorldsDir:    worldsDir,
+		WorldFileExt: worldFileExt,
+		ChannelFlag:  channelFlag,
+		QuietFlag:    quietFlag,
+		VerboseFlag:  verboseFlag,
+	})
 
 	// Load channel before check command (so check uses correct channel)
 	if !channelExplicitlySet {
@@ -1955,7 +1794,7 @@ func main() {
 // SECTION 5: UPDATE OPERATIONS
 // ============================================================================
 
-func getPendingUpdates() ([]FileInfo, []string, error) {
+func getPendingUpdates() ([]manifest.FileInfo, []string, error) {
 	localManifest, err := loadLocalManifest()
 	if err != nil {
 		// If manifest is missing or corrupted but we're in an installation directory, auto-generate it from local files
@@ -1989,13 +1828,13 @@ func getPendingUpdates() ([]FileInfo, []string, error) {
 	excludes := loadExcludes()
 
 	// Normalize local manifest keys for case-insensitive comparison
-	normalizedLocal := make(map[string]FileInfo)
+	normalizedLocal := make(map[string]manifest.FileInfo)
 	for path, info := range localManifest {
 		normalized := normalizePath(path)
 		normalizedLocal[normalized] = info
 	}
 
-	var updates []FileInfo
+	var updates []manifest.FileInfo
 	for path, remote := range remoteManifest {
 		normalized := normalizePath(path)
 		// Check if file matches any exclusion pattern
@@ -2033,7 +1872,7 @@ func getPendingUpdates() ([]FileInfo, []string, error) {
 }
 
 // printCheckOutput shows what updates are available (either human-readable or machine format)
-func printCheckOutput(updates []FileInfo, deletedFiles []string) {
+func printCheckOutput(updates []manifest.FileInfo, deletedFiles []string) {
 	hasUpdates := len(updates) > 0 || len(deletedFiles) > 0
 	totalChanges := len(updates) + len(deletedFiles)
 	restartRequired := needsToUpdateMUSHClientExe(updates)
@@ -2102,7 +1941,7 @@ func printCheckOutput(updates []FileInfo, deletedFiles []string) {
 	}
 }
 
-func performUpdates(updates []FileInfo) error {
+func performUpdates(updates []manifest.FileInfo) error {
 	// We already checked if MUSHclient was running earlier in main()
 
 	// If it's a fresh install or lots of files changed, download as one big zip file for speed.
@@ -2130,7 +1969,7 @@ func performUpdates(updates []FileInfo) error {
 	for i, u := range updates {
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(info FileInfo, idx int) {
+		go func(info manifest.FileInfo, idx int) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			if err := downloadFile(info); err != nil {
@@ -2179,7 +2018,7 @@ func performUpdates(updates []FileInfo) error {
 	return saveManifest()
 }
 
-func downloadFile(info FileInfo) error {
+func downloadFile(info manifest.FileInfo) error {
 	// Never overwrite user configuration files
 	if isUserConfigFile(info.Name) {
 		if verboseFlag {
@@ -2243,7 +2082,7 @@ func downloadFile(info FileInfo) error {
 	return nil
 }
 
-func downloadAndExtractZip(zipURL string, targetDir string, isInstall bool, filesToExtract []FileInfo) error {
+func downloadAndExtractZip(zipURL string, targetDir string, isInstall bool, filesToExtract []manifest.FileInfo) error {
 	if nonInteractive {
 		fmt.Println("Downloading...")
 	} else if !quietFlag {
@@ -2507,7 +2346,7 @@ func downloadAndExtractZip(zipURL string, targetDir string, isInstall bool, file
 	return nil
 }
 
-func downloadZipAndExtract(updates []FileInfo) error {
+func downloadZipAndExtract(updates []manifest.FileInfo) error {
 	zipURL, err := getZipURLForChannel()
 	if err != nil {
 		return err
@@ -2532,7 +2371,7 @@ func downloadZipAndExtract(updates []FileInfo) error {
 // SECTION 4: MANIFEST MANAGEMENT
 // ============================================================================
 
-func loadLocalManifest() (map[string]FileInfo, error) {
+func loadLocalManifest() (map[string]manifest.FileInfo, error) {
 	baseDir, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get working directory: %w", err)
@@ -2555,14 +2394,14 @@ func loadLocalManifest() (map[string]FileInfo, error) {
 	}
 	cleanedData := strings.Join(jsonLines, "\n")
 
-	var manifest map[string]FileInfo
+	var manifest map[string]manifest.FileInfo
 	if err := json.Unmarshal([]byte(cleanedData), &manifest); err != nil {
 		return nil, fmt.Errorf("failed to parse local manifest: %w", err)
 	}
 	return manifest, nil
 }
 
-func loadRemoteManifest() (map[string]FileInfo, error) {
+func loadRemoteManifest() (map[string]manifest.FileInfo, error) {
 	var ref string
 
 	if channelFlag == "stable" {
@@ -2596,7 +2435,7 @@ func loadRemoteManifest() (map[string]FileInfo, error) {
 	}
 
 	// Convert tree to manifest format
-	manifest := make(map[string]FileInfo)
+	fileManifest := make(map[string]manifest.FileInfo)
 	for _, item := range tree.Tree {
 		// Only include files (blobs), not directories (trees)
 		if item.Type != "blob" {
@@ -2614,7 +2453,7 @@ func loadRemoteManifest() (map[string]FileInfo, error) {
 		// Generate raw URL
 		rawURL := getRawURLForTag(ref, item.Path)
 
-		manifest[normalizedPath] = FileInfo{
+		fileManifest[normalizedPath] = manifest.FileInfo{
 			Name: normalizedPath,
 			Hash: item.SHA, // Git SHA-1 hash from GitHub API
 			URL:  rawURL,
@@ -2622,10 +2461,10 @@ func loadRemoteManifest() (map[string]FileInfo, error) {
 	}
 
 	if !quietFlag && verboseFlag {
-		fmt.Printf("Found %d files in repository\n", len(manifest))
+		fmt.Printf("Found %d files in repository\n", len(fileManifest))
 	}
 
-	return manifest, nil
+	return fileManifest, nil
 }
 
 func shouldExcludeFromManifest(path string) bool {
@@ -2677,7 +2516,7 @@ func saveManifest() error {
 
 	// Only save files to local manifest that exist both in remote AND locally on disk
 	// This ensures the local manifest accurately represents what's actually installed
-	localManifest := make(map[string]FileInfo)
+	localManifest := make(map[string]manifest.FileInfo)
 	for path, info := range remoteManifest {
 		filePath := filepath.Join(baseDir, denormalizePath(path))
 		if _, err := os.Stat(filePath); err == nil {
@@ -3169,7 +3008,7 @@ func hasWorldFilesInCurrentDir() bool {
 // SECTION 16: MISCELLANEOUS
 // ============================================================================
 
-func needsToUpdateMUSHClientExe(updates []FileInfo) bool {
+func needsToUpdateMUSHClientExe(updates []manifest.FileInfo) bool {
 	for _, file := range updates {
 		if strings.ToLower(file.Name) == "mushclient.exe" {
 			return true
@@ -3410,7 +3249,7 @@ func createUpdaterExcludes() error {
 // SECTION 14: CHANGELOG/RELEASE NOTES
 // ============================================================================
 
-func buildChangelog(updates []FileInfo, deletedFiles []string) string {
+func buildChangelog(updates []manifest.FileInfo, deletedFiles []string) string {
 	var changelog strings.Builder
 	totalChanges := len(updates) + len(deletedFiles)
 
@@ -3474,7 +3313,7 @@ func buildChangelog(updates []FileInfo, deletedFiles []string) string {
 }
 
 // showChangelog displays updated and deleted files and offers to open in notepad
-func showChangelog(updates []FileInfo, deletedFiles []string) {
+func showChangelog(updates []manifest.FileInfo, deletedFiles []string) {
 	totalChanges := len(updates) + len(deletedFiles)
 	fmt.Printf("\n%d files were changed (%d updated, %d deleted)\n", totalChanges, len(updates), len(deletedFiles))
 

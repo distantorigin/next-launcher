@@ -169,27 +169,35 @@ func (c *Client) GetLastCommitDate(ref string) (string, error) {
 
 // GetLatestTag fetches the latest tag from the repository
 func (c *Client) GetLatestTag() (string, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", c.owner, c.repo)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/git/refs/tags", c.owner, c.repo)
 	resp, err := c.httpClient.Get(url)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch latest release: %w", err)
+		return "", fmt.Errorf("failed to fetch tags: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
-		return "", fmt.Errorf("no releases found")
-	}
-
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("failed to fetch latest release: HTTP %d", resp.StatusCode)
+		return "", fmt.Errorf("failed to fetch tags: HTTP %d", resp.StatusCode)
 	}
 
-	var release Release
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return "", fmt.Errorf("failed to parse release: %w", err)
+	var refs []Ref
+	if err := json.NewDecoder(resp.Body).Decode(&refs); err != nil {
+		return "", fmt.Errorf("failed to parse tags: %w", err)
 	}
 
-	return release.TagName, nil
+	if len(refs) == 0 {
+		return "", fmt.Errorf("no tags found in repository")
+	}
+
+	// Get the last tag (most recent)
+	lastRef := refs[len(refs)-1]
+	// Extract tag name from ref (refs/tags/v1.0.0 -> v1.0.0)
+	tagName := lastRef.Ref
+	if idx := strings.LastIndex(tagName, "/"); idx >= 0 {
+		tagName = tagName[idx+1:]
+	}
+
+	return tagName, nil
 }
 
 // GetTree fetches the tree object for a given ref
