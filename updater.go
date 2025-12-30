@@ -2671,56 +2671,16 @@ func launchMUSHClient() error {
 	return nil
 }
 
-// ------------------------
-// EXCLUDES
-// ------------------------
 func loadExcludes() map[string]struct{} {
 	baseDir, err := os.Getwd()
 	if err != nil {
 		return make(map[string]struct{})
 	}
-	excludes := make(map[string]struct{})
-	data, err := os.ReadFile(filepath.Join(baseDir, excludesFile))
-	if err != nil {
-		return excludes
-	}
-	lines := strings.Split(string(data), "\n")
-	for _, l := range lines {
-		l = strings.TrimSpace(l)
-		if l != "" && !strings.HasPrefix(l, "#") {
-			// Normalize path for case-insensitive comparison
-			normalized := strings.ToLower(normalizePath(l))
-			excludes[normalized] = struct{}{}
-		}
-	}
-	return excludes
+	return paths.LoadExcludes(filepath.Join(baseDir, excludesFile))
 }
 
-// Supports wildcards like worldsDir+"/*."+worldFileExt[1:]
 func matchesExclusionPattern(path string, excludes map[string]struct{}) bool {
-	normalizedPath := strings.ToLower(normalizePath(path))
-
-	for pattern := range excludes {
-		// Check for exact match first
-		if normalizedPath == pattern {
-			return true
-		}
-
-		// Check for wildcard patterns
-		if strings.Contains(pattern, "*") {
-			matched, _ := filepath.Match(pattern, normalizedPath)
-			if matched {
-				return true
-			}
-		}
-
-		// Check for directory prefix (e.g., "worlds/" matches "worlds/myfile.mcl")
-		if strings.HasSuffix(pattern, "/") && strings.HasPrefix(normalizedPath, pattern) {
-			return true
-		}
-	}
-
-	return false
+	return paths.MatchesExclusion(path, excludes)
 }
 
 // ------------------------

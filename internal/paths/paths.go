@@ -1,6 +1,7 @@
 package paths
 
 import (
+	"bufio"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,6 +68,51 @@ func IsUserConfig(path string) bool {
 	}
 	if strings.HasPrefix(normalizedPath, "worlds/settings/") {
 		return true
+	}
+
+	return false
+}
+
+// LoadExcludes reads exclusion patterns from an excludes file
+func LoadExcludes(excludesPath string) map[string]struct{} {
+	excludes := make(map[string]struct{})
+
+	file, err := os.Open(excludesPath)
+	if err != nil {
+		return excludes
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" && !strings.HasPrefix(line, "#") {
+			normalized := strings.ToLower(Normalize(line))
+			excludes[normalized] = struct{}{}
+		}
+	}
+	return excludes
+}
+
+// MatchesExclusion checks if a path matches any exclusion pattern
+func MatchesExclusion(path string, excludes map[string]struct{}) bool {
+	normalizedPath := strings.ToLower(Normalize(path))
+
+	for pattern := range excludes {
+		if normalizedPath == pattern {
+			return true
+		}
+
+		if strings.Contains(pattern, "*") {
+			matched, _ := filepath.Match(pattern, normalizedPath)
+			if matched {
+				return true
+			}
+		}
+
+		if strings.HasSuffix(pattern, "/") && strings.HasPrefix(normalizedPath, pattern) {
+			return true
+		}
 	}
 
 	return false
