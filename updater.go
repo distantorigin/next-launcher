@@ -5,7 +5,9 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/sha1"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -23,6 +25,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/cavaliergopher/grab/v3"
 	"github.com/go-ole/go-ole"
 	"github.com/go-ole/go-ole/oleutil"
 	"github.com/gopxl/beep"
@@ -54,8 +57,7 @@ import (
 //      getLatestTag, getZipURLForChannel, getGitHubTree, getRawURLForTag
 //
 // 4. MANIFEST MANAGEMENT
-//    - loadLocalManifest, loadRemoteManifest, shouldExcludeFromManifest,
-//      saveManifest
+//    - loadRemoteManifest, saveManifest
 //
 // 5. UPDATE OPERATIONS
 //    - getPendingUpdates, printCheckOutput, performUpdates, downloadFile,
@@ -131,11 +133,11 @@ var selectSound []byte
 var (
 	_ embed.FS // Ensure embed package is recognized by compiler
 
-	speakerOnce        sync.Once
-	speakerReady       bool // Set to true after speaker is initialized (thread-safe via sync.Once)
-	speakerFormat      beep.Format // Store the format for later use
-	backgroundVolume   *effects.Volume
-	backgroundMutex    sync.Mutex
+	speakerOnce      sync.Once
+	speakerReady     bool        // Set to true after speaker is initialized (thread-safe via sync.Once)
+	speakerFormat    beep.Format // Store the format for later use
+	backgroundVolume *effects.Volume
+	backgroundMutex  sync.Mutex
 )
 
 // Set up Windows API calls to attach or create a console window
@@ -170,7 +172,7 @@ func ensureSpeakerInitialized(format beep.Format) {
 		}
 		speaker.Init(format.SampleRate, format.SampleRate.N(time.Second/10))
 		speakerFormat = format // Store for potential future use
-		speakerReady = true   // Mark as initialized (thread-safe within sync.Once)
+		speakerReady = true    // Mark as initialized (thread-safe within sync.Once)
 	})
 }
 
@@ -411,7 +413,7 @@ func playSoundWithDucking(soundData []byte, foregroundVolumeDB float64) {
 }
 
 const (
-	updaterVersion = "1.2.05"
+	updaterVersion = "1.3.2"
 	githubOwner    = "distantorigin"
 	githubRepo     = "miriani-next"
 	manifestFile   = ".manifest"
@@ -437,6 +439,9 @@ const (
 
 	// Default Toastush miriani.mcl SHA1 hash (unmodified version)
 	defaultToastushMCLHash = "57b5a6a2ace40a151fe3f1e1eddd029189ff9097"
+
+	// Windows process creation flags
+	DETACHED_PROCESS = 0x00000008
 )
 
 var (
@@ -461,13 +466,14 @@ var (
 	switchChannelSubcommand bool
 	channelExplicitlySet    bool
 	allowRestartFlag        bool
+	selfUpdateCheckFlag     bool
 	subcommand              string // Current subcommand being executed
 )
 
 // ErrUserCancelled is returned when the user cancels an operation
 var ErrUserCancelled = fmt.Errorf("operation cancelled by user")
 
-type Version struct{
+type Version struct {
 	Major  int    `json:"major"`
 	Minor  int    `json:"minor"`
 	Patch  int    `json:"patch"`
@@ -627,7 +633,7 @@ func validateChannelSwitch(fromChannel, toChannel string) error {
 			// Target is behind experimental!
 			fmt.Printf("\nWARNING: %s is %d commits BEHIND %s.\n", toChannel, comparison.BehindBy, fromChannel)
 			fmt.Println("Switching would be a DOWNGRADE.")
-			
+
 			if !confirmAction(fmt.Sprintf("Switch to older %s version anyway?", toChannel)) {
 				return fmt.Errorf("user cancelled downgrade to %s", toChannel)
 			}
@@ -806,7 +812,7 @@ func isUserConfigFile(path string) bool {
 		return true
 	} else if strings.HasPrefix(normalizedPath, "logs/") {
 		return true
-		} else if strings.HasPrefix(normalizedPath, "worlds/settings/") {
+	} else if strings.HasPrefix(normalizedPath, "worlds/settings/") {
 		return true
 	}
 
@@ -820,12 +826,12 @@ func logProgress(format string, args ...interface{}) {
 }
 
 type UpdateResult struct {
-	Result       string   `json:"result"`        // "success" or "failure"
-	Message      string   `json:"message,omitempty"` // Error message if failure
-	Version      string   `json:"version,omitempty"` // Full version string if success
-	FilesAdded   []string `json:"files_added,omitempty"` // Array of added/updated file paths
+	Result       string   `json:"result"`                  // "success" or "failure"
+	Message      string   `json:"message,omitempty"`       // Error message if failure
+	Version      string   `json:"version,omitempty"`       // Full version string if success
+	FilesAdded   []string `json:"files_added,omitempty"`   // Array of added/updated file paths
 	FilesDeleted []string `json:"files_deleted,omitempty"` // Array of deleted file paths
-	Restarted    bool     `json:"restarted"`     // Whether MUSHclient was restarted
+	Restarted    bool     `json:"restarted"`               // Whether MUSHclient was restarted
 }
 
 func writeUpdateSuccess(updates []manifest.FileInfo, deletedFiles []string, wasRestarted bool) error {
@@ -944,15 +950,26 @@ func main() {
 	// Global panic handler to prevent path leakage in error messages
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "\nOops, something broke: %v\n", r)
-			fmt.Fprintln(os.Stderr, "Let the developers know what happened.")
+			fmt.Fprintf(os.Stderr, "\nAn unexpected error occurred: %v\n", r)
+			fmt.Fprintln(os.Stderr, "Please report this issue to the developers.")
 			playSound(errorSound)
+			if !nonInteractive {
+				waitForUser("\nPress Enter to exit...")
+			}
 			os.Exit(1)
 		}
 	}()
 
 	// Configure log package to not include file paths
 	log.SetFlags(0)
+
+	// Normalize double-dash flags to single-dash (Go's flag package uses single dash)
+	// This allows users to use --channel instead of -channel
+	for i, arg := range os.Args {
+		if strings.HasPrefix(arg, "--") && !strings.HasPrefix(arg, "---") {
+			os.Args[i] = arg[1:] // Remove one dash
+		}
+	}
 
 	// Check for subcommands before parsing flags
 	var subcommandArgs []string
@@ -970,29 +987,14 @@ func main() {
 	flag.BoolVar(&generateManifest, "generate-manifest", false, "Generate manifest file for current directory")
 	flag.BoolVar(&nonInteractive, "non-interactive", false, "Non-interactive mode: log to file, no prompts, write .update-success")
 	flag.BoolVar(&allowRestartFlag, "allow-restart", false, "Allow restart in non-interactive mode (use with -non-interactive)")
-	
+	flag.BoolVar(&selfUpdateCheckFlag, "self-update-check", false, "Internal: Check for updater self-update (spawned in background)")
+
 	// Only parse flags if not using subcommand syntax
 	if subcommand == "" {
 		flag.Parse()
 	} else {
-		// Parse flags from subcommand args
-		// Separate flags from positional args since flag.Parse stops at first non-flag
-		var flagArgs []string
-		var positionalArgs []string
-		for _, arg := range subcommandArgs {
-			if strings.HasPrefix(arg, "-") {
-				flagArgs = append(flagArgs, arg)
-			} else {
-				positionalArgs = append(positionalArgs, arg)
-			}
-		}
-
-		// Parse flags first
-		flag.CommandLine.Parse(flagArgs)
-
-		// Manually set flag.Args() to the positional args by parsing them again
-		// This is a workaround since we can't directly set flag.Args()
-		flag.CommandLine.Parse(append(flagArgs, positionalArgs...))
+		// Parse subcommand args - let flag package handle flag/value separation
+		flag.CommandLine.Parse(subcommandArgs)
 	}
 
 	// Initialize console attachment after parsing flags
@@ -1128,6 +1130,24 @@ func main() {
 			fatalError("Error checking updates: %v", err)
 		}
 		printCheckOutput(updates, deletedFiles)
+
+		// Spawn detached self-update check before exiting
+		exePath, err := os.Executable()
+		if err == nil {
+			cmd := exec.Command(exePath, "--self-update-check")
+			// Detach completely - don't inherit handles
+			cmd.SysProcAttr = &syscall.SysProcAttr{
+				CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS,
+			}
+			// Close all standard handles so process doesn't inherit them
+			cmd.Stdin = nil
+			cmd.Stdout = nil
+			cmd.Stderr = nil
+			if err := cmd.Start(); err == nil {
+				cmd.Process.Release() // Release the process handle immediately
+			}
+		}
+
 		return
 	}
 
@@ -1137,8 +1157,12 @@ func main() {
 		return
 	}
 
-	// Self-update logic (fails silently with short timeout)
-	selfUpdate()
+	// If self-update check flag is set, wait briefly then check for updates
+	if selfUpdateCheckFlag {
+		time.Sleep(500 * time.Millisecond) // Wait for parent process to exit
+		selfUpdate()                       // Check and update if needed (silent)
+		return
+	}
 
 	// If generating manifest, do that and exit
 	if generateManifest {
@@ -1147,7 +1171,6 @@ func main() {
 		}
 		return
 	}
-
 
 	if switchChannelSubcommand {
 		var newChannel string
@@ -1194,7 +1217,7 @@ func main() {
 			waitForUser("\nPress Enter to exit...")
 		}
 		return
-		
+
 	}
 
 	// If no channel flag was explicitly set, try to load saved channel
@@ -1217,7 +1240,7 @@ func main() {
 	// Set baseURL
 	baseURL = fmt.Sprintf("https://github.com/%s/%s", githubOwner, githubRepo)
 
-	if  verboseFlag && !quietFlag {
+	if verboseFlag && !quietFlag {
 		if channelFlag == "stable" {
 			if tag, err := getLatestTag(); err == nil {
 				fmt.Printf("Latest available: %s\n", tag)
@@ -1244,7 +1267,6 @@ func main() {
 
 		// Check for a Toastush installation
 		toastushPath := detectToastushInstallation()
-
 
 		playSoundAsync(startSound, 0.0)
 
@@ -1430,15 +1452,6 @@ func main() {
 
 			// Run the updater from the new location to get them up to date
 			if !nonInteractive {
-				// Check if MUSHclient is running
-				if isMUSHClientRunning() {
-					fmt.Println("\nMUSHclient is currently running.")
-					fmt.Println("Please close MUSHclient before running the updater.")
-					playSound(errorSound)
-					waitForUser("\nPress Enter to exit...")
-					return
-				}
-
 				fmt.Println("\nRunning updater to check for updates...")
 				updaterPath := filepath.Join(installDir, "update.exe")
 				cmd := exec.Command(updaterPath)
@@ -1515,7 +1528,6 @@ func main() {
 		}
 	}
 
-	// If we get here, we're installed in the current directory
 	if err := cleanOldFolder(); err != nil {
 		if !quietFlag && verboseFlag {
 			fmt.Printf("Warning: failed to clean .old directory: %v\n", err)
@@ -1531,6 +1543,7 @@ func main() {
 	updates, deletedFiles, err := getPendingUpdates()
 	if err != nil {
 		fatalError("Error checking updates: %v", err)
+		waitForUser("Press enter to exit...\n")
 	}
 
 	if len(updates) == 0 && len(deletedFiles) == 0 {
@@ -1538,6 +1551,25 @@ func main() {
 		if !quietFlag {
 			playSoundAsync(upToDateSound, 0.0)
 		}
+
+		// Spawn detached self-update check before exiting
+		exePath, err := os.Executable()
+		if err == nil {
+			cmd := exec.Command(exePath, "--self-update-check")
+			// Detach completely - don't inherit handles
+			cmd.SysProcAttr = &syscall.SysProcAttr{
+				CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS,
+			}
+			// Close all standard handles so process doesn't inherit them
+			cmd.Stdin = nil
+			cmd.Stdout = nil
+			cmd.Stderr = nil
+			if err := cmd.Start(); err == nil {
+				cmd.Process.Release() // Release the process handle immediately
+			}
+		}
+
+		waitForUser("\nPress Enter to exit...")
 		return
 	}
 
@@ -1546,7 +1578,8 @@ func main() {
 		fmt.Printf("\n%d files will be changed (%d updates, %d deletions).\n", totalChanges, len(updates), len(deletedFiles))
 	}
 
-	// Check if MUSHclient is running - only if we need to update MUSHclient.exe itself
+	// Track whether we killed MUSHclient so we know to restart it later
+	// Only set to true if we actually kill the process
 	mushWasRunning := false
 	restartRequired := needsToUpdateMUSHClientExe(updates)
 
@@ -1571,8 +1604,10 @@ func main() {
 				mushWasRunning = true
 				logProgress("MUSHclient killed successfully. Proceeding with update...")
 				playSoundAsync(successSound, 0.0)
-				// Wait a moment for process to fully terminate
-				time.Sleep(1 * time.Second)
+				// Wait for process to fully terminate
+				if !waitForProcessToTerminate("MUSHclient.exe", 5*time.Second) {
+					logProgress("Warning: MUSHclient may not have fully terminated")
+				}
 			} else {
 				// This shouldn't happen since we checked above, but handle it anyway
 				fmt.Println("restart required")
@@ -1592,7 +1627,6 @@ func main() {
 	// Ask for confirmation before updating
 	if !confirmAction("Do you want to proceed with the update?") {
 		fmt.Println("Update cancelled.")
-		waitForUser("Press Enter to exit...")
 		return
 	}
 
@@ -1641,15 +1675,6 @@ func main() {
 				fmt.Println("MUSHclient restarted.")
 			}
 		}
-	} else if !mushWasRunning {
-		// Launch MUSHclient if it wasn't running before
-		if err := launchMUSHClient(); err != nil {
-			if !nonInteractive {
-				fmt.Printf("Warning: failed to launch MUSHclient: %v\n", err)
-			}
-		} else if !quietFlag && !nonInteractive {
-			fmt.Println("MUSHclient launched.")
-		}
 	}
 
 	playSound(successSound)
@@ -1663,139 +1688,171 @@ func main() {
 			logProgress("Warning: failed to write .update-result: %v", err)
 		}
 	}
+
+	// Spawn detached background process for self-update check (non-blocking)
+	// This allows main process to exit immediately while self-update happens in background
+	exePath, err := os.Executable()
+	if err == nil {
+		cmd := exec.Command(exePath, "--self-update-check")
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS,
+		}
+		cmd.Start() // Fire and forget - don't wait
+	}
 }
-	
-	// selfUpdate checks for a new version of the updater itself and replaces it if a new version is available.
-	// This function fails silently with a short timeout to avoid blocking the main update process.
-	func selfUpdate() error {
-		const updaterVersionURL = "https://anomalousabode.com/next/updater-version"
+
+// selfUpdate checks for a new version of the updater itself and replaces it if a new version is available.
+// This function fails silently with a short timeout to avoid blocking the main update process.
+func selfUpdate() error {
+	const updaterVersionURL = "https://anomalousabode.com/next/updater-version"
 	const updaterBinaryURL = "https://anomalousabode.com/next/updater"
+	const updaterHashURL = "https://anomalousabode.com/next/updater.sha256"
 
-		// Get the path of the current executable
-		exePath, err := os.Executable()
-		if err != nil {
-			// Silent failure - not critical
-			return nil
-		}
-
-		// Create a client with a very short timeout for self-update check (3 seconds)
-		quickClient := &http.Client{
-			Timeout: 500 * time.Millisecond,
-			Transport: &http.Transport{
-				MaxIdleConns:        10,
-				MaxIdleConnsPerHost: 2,
-				IdleConnTimeout:     10 * time.Second,
-				DisableCompression:  false,
-			},
-		}
-
-		// Make a request to the update URL
-		resp, err := quickClient.Get(updaterVersionURL)
-		if err != nil {
-			// Silent failure - network issues, server down, etc.
-			return nil
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			// Silent failure - updater not available or other HTTP error
-			return nil
-		}
-
-		// Read the remote version
-		versionData, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil
-		}
-
-		remoteVersion := strings.TrimSpace(string(versionData))
-		if remoteVersion == "" || remoteVersion == updaterVersion {
-			return nil
-		}
-
-		// Update available - notify user
-		if !quietFlag && !nonInteractive {
-			fmt.Printf("\nAn update for the updater is available!\n")
-			fmt.Printf("Current: %s. New version: %s\n\n", updaterVersion, remoteVersion)
-			fmt.Printf("Downloading and installing update...\n")
-			playSoundAsyncLoop(downloadingSound, 0.0, true)
-		}
-
-		// Download new binary (use longer timeout)
-		downloadClient := &http.Client{Timeout: 120 * time.Second}
-		binaryResp, err := downloadClient.Get(updaterBinaryURL)
-		if err != nil {
-			if !quietFlag && !nonInteractive {
-				fmt.Printf("Download failed: %v\n", err)
-				playSound(errorSound)
-			}
-			return nil
-		}
-		defer binaryResp.Body.Close()
-
-		if binaryResp.StatusCode != http.StatusOK {
-			return nil
-		}
-
-		data, err := io.ReadAll(binaryResp.Body)
-		if err != nil {
-			return nil
-		}
-
- 		// Rename running exe, write new one, restart
-		oldExe := exePath + ".old"
-		os.Remove(oldExe)
-		if err := os.Rename(exePath, oldExe); err != nil {
-			return nil
-		}
-
-		if err := os.WriteFile(exePath, data, 0755); err != nil {
-			os.Rename(oldExe, exePath)
-			return nil
-		}
-
-		if !quietFlag && !nonInteractive {
-			fmt.Printf("Update installed! Restarting...\n\n")
-			playSound(successSound)
-			time.Sleep(1 * time.Second)
-		}
-
-		// Restart with same arguments
-		cmd := exec.Command(exePath, os.Args[1:]...)
-
-		// On Windows, we need to properly detach the child process
-		// Inherit stdin/stdout/stderr so the new process shows in the same console
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-
-		// Set environment variable to signal cleanup of .old file
-		cmd.Env = append(os.Environ(), "UPDATER_CLEANUP_OLD=1")
-
-		// Start the new process
-		if err := cmd.Start(); err != nil {
-			if !quietFlag && !nonInteractive {
-				fmt.Printf("Failed to restart updater: %v\n", err)
-			}
-			// Restore old executable if restart failed
-			os.Remove(exePath)
-			os.Rename(oldExe, exePath)
-			return err
-		}
-
-		// Give the new process a moment to initialize before we exit
-		time.Sleep(100 * time.Millisecond)
-		os.Exit(0)
-
+	// Get the path of the current executable
+	exePath, err := os.Executable()
+	if err != nil {
+		// Silent failure - not critical
 		return nil
 	}
+
+	// Create a client with a very short timeout for self-update check
+	quickClient := &http.Client{
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        10,
+			MaxIdleConnsPerHost: 2,
+			IdleConnTimeout:     10 * time.Second,
+			DisableCompression:  false,
+		},
+	}
+
+	// Make a request to the update URL
+	resp, err := quickClient.Get(updaterVersionURL)
+	if err != nil {
+		// Silent failure - network issues, server down, etc.
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		// Silent failure - updater not available or other HTTP error
+		return nil
+	}
+
+	// Read the remote version
+	versionData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
+	}
+
+	remoteVersion := strings.TrimSpace(string(versionData))
+	if remoteVersion == "" || remoteVersion == updaterVersion {
+		return nil
+	}
+
+	// Update available - download the expected hash first
+	downloadClient := &http.Client{Timeout: 30 * time.Second}
+
+	hashResp, err := downloadClient.Get(updaterHashURL)
+	if err != nil {
+		// Silent failure - can't verify without hash
+		return nil
+	}
+	defer hashResp.Body.Close()
+
+	if hashResp.StatusCode != http.StatusOK {
+		// Silent failure - hash not available, refuse to update without verification
+		return nil
+	}
+
+	hashData, err := io.ReadAll(hashResp.Body)
+	if err != nil {
+		return nil
+	}
+
+	// Parse expected hash (format: "sha256hash  filename" or just "sha256hash")
+	expectedHash := strings.TrimSpace(string(hashData))
+	if idx := strings.Index(expectedHash, " "); idx > 0 {
+		expectedHash = expectedHash[:idx]
+	}
+	expectedHash = strings.ToLower(expectedHash)
+
+	if len(expectedHash) != 64 {
+		// Invalid hash format, refuse to update
+		return nil
+	}
+
+	// Download new binary
+	binaryResp, err := downloadClient.Get(updaterBinaryURL)
+	if err != nil {
+		// Silent failure
+		return nil
+	}
+	defer binaryResp.Body.Close()
+
+	if binaryResp.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	data, err := io.ReadAll(binaryResp.Body)
+	if err != nil {
+		return nil
+	}
+
+	// Verify SHA256 hash before replacing
+	actualHash := sha256.Sum256(data)
+	actualHashStr := hex.EncodeToString(actualHash[:])
+
+	if actualHashStr != expectedHash {
+		// Hash mismatch - binary may be corrupted or tampered with, refuse to update
+		return nil
+	}
+
+	// Hash verified - safe to replace
+	oldExe := exePath + ".old"
+	os.Remove(oldExe)
+	if err := os.Rename(exePath, oldExe); err != nil {
+		return nil
+	}
+
+	if err := os.WriteFile(exePath, data, 0755); err != nil {
+		os.Rename(oldExe, exePath)
+		return nil
+	}
+
+	// Restart with same arguments (silently)
+	cmd := exec.Command(exePath, os.Args[1:]...)
+
+	// On Windows, we need to properly detach the child process
+	// Inherit stdin/stdout/stderr so the new process shows in the same console
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	// Set environment variable to signal cleanup of .old file
+	cmd.Env = append(os.Environ(), "UPDATER_CLEANUP_OLD=1")
+
+	// Start the new process
+	if err := cmd.Start(); err != nil {
+		// Restore old executable if restart failed
+		os.Remove(exePath)
+		os.Rename(oldExe, exePath)
+		return err
+	}
+
+	// Give the new process a moment to initialize before we exit
+	time.Sleep(100 * time.Millisecond)
+	os.Exit(0)
+
+	return nil
+}
 
 // ============================================================================
 // SECTION 5: UPDATE OPERATIONS
 // ============================================================================
 
 func getPendingUpdates() ([]manifest.FileInfo, []string, error) {
-	localManifest, err := loadLocalManifest()
+	localManifest, err := manifestManager.LoadLocal()
 	if err != nil {
 		// If manifest is missing or corrupted but we're in an installation directory, auto-generate it from local files
 		if hasWorldFilesInCurrentDir() {
@@ -1812,7 +1869,7 @@ func getPendingUpdates() ([]manifest.FileInfo, []string, error) {
 				return nil, nil, fmt.Errorf("failed to generate local manifest: %w", err)
 			}
 			// Try loading again after generation
-			localManifest, err = loadLocalManifest()
+			localManifest, err = manifestManager.LoadLocal()
 			if err != nil {
 				return nil, nil, err
 			}
@@ -1933,7 +1990,7 @@ func printCheckOutput(updates []manifest.FileInfo, deletedFiles []string) {
 			if !quietFlag {
 				playSoundAsync(upToDateSound, 0.0)
 			}
-			fmt.Println("\nYou're already up to date!")
+			fmt.Println("\nAlready up to date!")
 			if localErr == nil {
 				fmt.Printf("Current version: %s\n", localVer.String())
 			}
@@ -1999,7 +2056,7 @@ func performUpdates(updates []manifest.FileInfo) error {
 				}
 			}
 		}(u, i)
-	} 
+	}
 	wg.Wait()
 
 	if !quietFlag && !verboseFlag && !nonInteractive {
@@ -2018,6 +2075,9 @@ func performUpdates(updates []manifest.FileInfo) error {
 	return saveManifest()
 }
 
+// grabClient is a shared grab client with retry and timeout settings
+var grabClient = grab.NewClient()
+
 func downloadFile(info manifest.FileInfo) error {
 	// Never overwrite user configuration files
 	if isUserConfigFile(info.Name) {
@@ -2025,16 +2085,6 @@ func downloadFile(info manifest.FileInfo) error {
 			log.Printf("Skipping user config file: %s\n", info.Name)
 		}
 		return nil
-	}
-
-	resp, err := httpClient.Get(info.URL)
-	if err != nil {
-		return fmt.Errorf("failed to download %s: %w", info.Name, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to download %s: HTTP %d", info.Name, resp.StatusCode)
 	}
 
 	baseDir, err := os.Getwd()
@@ -2065,20 +2115,25 @@ func downloadFile(info manifest.FileInfo) error {
 		return fmt.Errorf("failed to find path for %s: %w", info.Name, err)
 	}
 
+	// Ensure directory exists
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
 		return fmt.Errorf("failed to create directory for %s: %w", info.Name, err)
 	}
 
-	out, err := os.Create(targetPath)
+	// Create grab request
+	req, err := grab.NewRequest(targetPath, info.URL)
 	if err != nil {
-		return fmt.Errorf("failed to create file %s: %w", info.Name, err)
+		return fmt.Errorf("failed to create request for %s: %w", info.Name, err)
 	}
-	defer out.Close()
 
-	_, err = io.Copy(out, resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to write file %s: %w", info.Name, err)
+	// Download with retry (grab handles retries and resume automatically)
+	resp := grabClient.Do(req)
+
+	// Wait for completion
+	if err := resp.Err(); err != nil {
+		return fmt.Errorf("failed to download %s: %w", info.Name, err)
 	}
+
 	return nil
 }
 
@@ -2087,87 +2142,74 @@ func downloadAndExtractZip(zipURL string, targetDir string, isInstall bool, file
 		fmt.Println("Downloading...")
 	} else if !quietFlag {
 		fmt.Printf("Downloading archive...\n")
-		fmt.Printf("Downloading: %s", zipURL)
 	}
 	// Play downloading sound during fresh installation download
 	if isInstall {
 		playSoundAsyncLoop(downloadingSound, 0.0, true) // Normal volume for downloading sound, looping
 	}
 
-	resp, err := httpClient.Get(zipURL)
+	// Create temp file for download
+	tempFile, err := os.CreateTemp("", "miriani-update-*.zip")
 	if err != nil {
-		return fmt.Errorf("failed to download archive: %w", err)
+		return fmt.Errorf("failed to create temp file: %w", err)
 	}
-	defer resp.Body.Close()
+	tempPath := tempFile.Name()
+	tempFile.Close()
+	defer os.Remove(tempPath) // Clean up temp file when done
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to download archive: HTTP %d", resp.StatusCode)
+	// Create grab request for ZIP download
+	req, err := grab.NewRequest(tempPath, zipURL)
+	if err != nil {
+		return fmt.Errorf("failed to create download request: %w", err)
 	}
 
-	// Get content length for progress
-	contentLength := resp.ContentLength
+	// Start download
+	resp := grabClient.Do(req)
 
-	// Read with progress updates
-	var zipData []byte
-	if contentLength > 0 {
-		zipData = make([]byte, 0, contentLength)
-		buf := make([]byte, 32*1024) // 32KB chunks
-		var downloaded int64
+	// Progress reporting loop
+	lastPercentage := -1
+	lastMB := int64(-1)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
 
-		for {
-			n, err := resp.Body.Read(buf)
-			if n > 0 {
-				zipData = append(zipData, buf[:n]...)
-				downloaded += int64(n)
-				percentage := (downloaded * 100) / contentLength
-				setConsoleTitle(fmt.Sprintf("%s - Downloading: %d%%", title, percentage))
-
-				if nonInteractive {
-					fmt.Printf("%d%%\n", percentage)
-				} else if !quietFlag && !verboseFlag {
-					fmt.Printf("\rDownloading: %d%%    ", percentage)
-				}
-			}
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return fmt.Errorf("failed to read archive data: %w", err)
-			}
-		}
-		if !quietFlag && !verboseFlag && !nonInteractive {
-			fmt.Printf("\n")
-		}
-	} else {
-		// No content length - download with byte count progress instead
-		buf := make([]byte, 32*1024) // 32KB chunks
-		var downloaded int64
-		lastReportTime := time.Now()
-
-		for {
-			n, err := resp.Body.Read(buf)
-			if n > 0 {
-				zipData = append(zipData, buf[:n]...)
-				downloaded += int64(n)
-
-				if time.Since(lastReportTime) >= 1500*time.Millisecond {
-					currentMB := int(downloaded / (1024 * 1024))
-					 if !quietFlag && !verboseFlag {
-						fmt.Printf("\r%d MB    ", currentMB)
+progressLoop:
+	for {
+		select {
+		case <-ticker.C:
+			// Check if we have content length for percentage progress
+			if resp.Size() > 0 {
+				percentage := int(resp.Progress() * 100)
+				if percentage != lastPercentage {
+					setConsoleTitle(fmt.Sprintf("%s - Downloading: %d%%", title, percentage))
+					if nonInteractive {
+						fmt.Printf("%d%%\n", percentage)
+					} else if !quietFlag && !verboseFlag {
+						fmt.Printf("\rDownloading: %d%%    ", percentage)
 					}
-					lastReportTime = time.Now()
+					lastPercentage = percentage
+				}
+			} else {
+				// No content length - show MB downloaded instead
+				mb := resp.BytesComplete() / (1024 * 1024)
+				if mb != lastMB {
+					if !quietFlag && !verboseFlag && !nonInteractive {
+						fmt.Printf("\rDownloading: %d MB    ", mb)
+					}
+					lastMB = mb
 				}
 			}
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return fmt.Errorf("failed to read archive data: %w", err)
-			}
+		case <-resp.Done:
+			break progressLoop
 		}
-		if !quietFlag && !verboseFlag && !nonInteractive {
-			fmt.Printf("\n")
-		}
+	}
+
+	if !quietFlag && !verboseFlag && !nonInteractive {
+		fmt.Printf("\n")
+	}
+
+	// Check for download errors
+	if err := resp.Err(); err != nil {
+		return fmt.Errorf("failed to download archive: %w", err)
 	}
 
 	if nonInteractive {
@@ -2184,7 +2226,19 @@ func downloadAndExtractZip(zipURL string, targetDir string, isInstall bool, file
 		playSoundAsyncLoop(installingSound, -1.5, true) // Slightly lower volume for installing sound, looping
 	}
 
-	r, err := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
+	// Open downloaded ZIP file
+	zipFile, err := os.Open(tempPath)
+	if err != nil {
+		return fmt.Errorf("failed to open downloaded archive: %w", err)
+	}
+	defer zipFile.Close()
+
+	zipStat, err := zipFile.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to stat downloaded archive: %w", err)
+	}
+
+	r, err := zip.NewReader(zipFile, zipStat.Size())
 	if err != nil {
 		return fmt.Errorf("failed to parse archive: %w", err)
 	}
@@ -2371,36 +2425,6 @@ func downloadZipAndExtract(updates []manifest.FileInfo) error {
 // SECTION 4: MANIFEST MANAGEMENT
 // ============================================================================
 
-func loadLocalManifest() (map[string]manifest.FileInfo, error) {
-	baseDir, err := os.Getwd()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get working directory: %w", err)
-	}
-	path := filepath.Join(baseDir, manifestFile)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read local manifest: %w", err)
-	}
-
-	// Strip comment lines (lines starting with //) before parsing JSON
-	lines := strings.Split(string(data), "\n")
-	var jsonLines []string
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		// Skip lines that start with // (comments)
-		if !strings.HasPrefix(trimmed, "//") {
-			jsonLines = append(jsonLines, line)
-		}
-	}
-	cleanedData := strings.Join(jsonLines, "\n")
-
-	var manifest map[string]manifest.FileInfo
-	if err := json.Unmarshal([]byte(cleanedData), &manifest); err != nil {
-		return nil, fmt.Errorf("failed to parse local manifest: %w", err)
-	}
-	return manifest, nil
-}
-
 func loadRemoteManifest() (map[string]manifest.FileInfo, error) {
 	var ref string
 
@@ -2443,7 +2467,7 @@ func loadRemoteManifest() (map[string]manifest.FileInfo, error) {
 		}
 
 		// Skip excluded files
-		if shouldExcludeFromManifest(item.Path) {
+		if manifestManager.ShouldExclude(item.Path, normalizePath) {
 			continue
 		}
 
@@ -2466,41 +2490,6 @@ func loadRemoteManifest() (map[string]manifest.FileInfo, error) {
 
 	return fileManifest, nil
 }
-
-func shouldExcludeFromManifest(path string) bool {
-	// Normalize the path for case-insensitive comparison
-	normalizedPath := strings.ToLower(normalizePath(path))
-
-	excludeList := []string{
-		".git/",
-		".github/",
-		".gitignore",
-		".manifest",
-		".updater-excludes",
-		"worlds/plugin/state/",
-		"update.exe",
-		"updater.exe",
-		"launcher.exe",
-		"version.json",
-		"mushclient_prefs.sqlite",
-		"mushclient.ini",
-	}
-
-	for _, pattern := range excludeList {
-		patternNormalized := strings.ToLower(pattern)
-		if strings.HasPrefix(normalizedPath, patternNormalized) || normalizedPath == strings.TrimSuffix(patternNormalized, "/") {
-			return true
-		}
-	}
-
-	// Exclude .mcl files in worlds directory (user configuration files)
-	if strings.HasPrefix(normalizedPath, worldsDir+"/") && strings.HasSuffix(normalizedPath, worldFileExt) {
-		return true
-	}
-
-	return false
-}
-
 
 func saveManifest() error {
 	// Get remote manifest (from GitHub API)
@@ -2550,7 +2539,7 @@ func handleInstallation() (string, error) {
 	}
 	defaultInstallDir := filepath.Join(usr, "Documents", "Miriani-Next")
 
-	fmt.Println("Welcome to the Miriani-Next installer.\n")
+	fmt.Println("Welcome to the Miriani-Next installer.")
 
 	// If no channel was explicitly set, prompt for selection during fresh install
 	if !channelExplicitlySet && !nonInteractive {
@@ -2586,8 +2575,10 @@ func handleInstallation() (string, error) {
 				return "", fmt.Errorf("failed to kill MUSHclient: %w", err)
 			}
 			logProgress("MUSHclient killed successfully. Proceeding with installation...")
-			// Wait a moment for process to fully terminate
-			time.Sleep(1 * time.Second)
+			// Wait for process to fully terminate
+			if !waitForProcessToTerminate("MUSHclient.exe", 5*time.Second) {
+				logProgress("Warning: MUSHclient may not have fully terminated")
+			}
 		} else {
 			// In interactive mode, tell user to close it
 			fmt.Println("\nMUSHclient is running and needs to be closed to update it.")
@@ -2706,7 +2697,7 @@ func handleInstallation() (string, error) {
 			fmt.Println("\nMUDMixer detected!")
 			fmt.Println("MUDMixer is a local proxy server that can provide additional features.")
 			fmt.Println("Would you like to configure Miriani-Next to connect through MUDMixer?")
-			fmt.Println("(This changes the connection from "+defaultServer+" to "+localServer+":"+mudMixerPort+")")
+			fmt.Println("(This changes the connection from " + defaultServer + " to " + localServer + ":" + mudMixerPort + ")")
 
 			if confirmAction("Configure Miriani to use MUDMixer?") {
 				worldFilePath := filepath.Join(installDir, worldsDir, worldFileName)
@@ -2714,7 +2705,7 @@ func handleInstallation() (string, error) {
 					fmt.Printf("Warning: failed to update world file for MUDMixer: %v\n", err)
 				} else {
 					fmt.Println("World file updated successfully!")
-					fmt.Println("Miriani-Next will now connect through MUDMixer ("+localServer+":"+mudMixerPort+")")
+					fmt.Println("Miriani-Next will now connect through MUDMixer (" + localServer + ":" + mudMixerPort + ")")
 				}
 			} else {
 				fmt.Println("Skipping MUDMixer configuration. You can manually change this later.")
@@ -2727,7 +2718,7 @@ func handleInstallation() (string, error) {
 			fmt.Println("\nProxiani detected!")
 			fmt.Println("Proxiani is a local proxy server that can provide additional features.")
 			fmt.Println("Would you like to configure Miriani-Next to connect through Proxiani?")
-			fmt.Println("(This changes the connection from "+defaultServer+" to "+localServer+":"+proxianiPort+")")
+			fmt.Println("(This changes the connection from " + defaultServer + " to " + localServer + ":" + proxianiPort + ")")
 
 			if confirmAction("Configure Miriani to use Proxiani?") {
 				worldFilePath := filepath.Join(installDir, worldsDir, worldFileName)
@@ -2735,7 +2726,7 @@ func handleInstallation() (string, error) {
 					fmt.Printf("Warning: failed to update world file for Proxiani: %v\n", err)
 				} else {
 					fmt.Println("World file updated successfully!")
-					fmt.Println("Miriani-Next will now connect through Proxiani ("+localServer+":"+proxianiPort+")")
+					fmt.Println("Miriani-Next will now connect through Proxiani (" + localServer + ":" + proxianiPort + ")")
 				}
 			} else {
 				fmt.Println("Skipping Proxiani configuration. You can manually change this later.")
@@ -2889,7 +2880,7 @@ func updateWorldFile(worldFilePath string, updatePort bool) error {
 
 	// Check if anything was actually changed
 	if updatedContent == content {
-		return fmt.Errorf("no "+defaultServer+" references found in world file")
+		return fmt.Errorf("no " + defaultServer + " references found in world file")
 	}
 
 	// Write back to file
@@ -3055,10 +3046,40 @@ func isMUSHClientRunning() bool {
 	return isMUSHClientRunningInDir(baseDir)
 }
 
+// waitForProcessToTerminate polls until the specified process is no longer running
+// Returns true if process terminated, false if timeout occurred
+func waitForProcessToTerminate(processName string, timeout time.Duration) bool {
+	start := time.Now()
+	for time.Since(start) < timeout {
+		// Check if any instance of the process is still running
+		cmd := exec.Command("tasklist", "/FI", fmt.Sprintf("IMAGENAME eq %s", processName), "/NH")
+		output, err := cmd.Output()
+		if err != nil {
+			// If tasklist fails, assume process is not running
+			return true
+		}
+
+		// If the process name doesn't appear in output, it's terminated
+		outputStr := strings.ToLower(string(output))
+		if !strings.Contains(outputStr, strings.ToLower(processName)) {
+			return true
+		}
+
+		// Wait a bit before checking again
+		time.Sleep(100 * time.Millisecond)
+	}
+	return false
+}
+
 func launchMUSHClient() error {
 	baseDir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("failed to get working directory: %w", err)
+	}
+
+	// Check if MUSHclient is already running to prevent duplicate instances
+	if isMUSHClientRunningInDir(baseDir) {
+		return fmt.Errorf("MUSHclient is already running")
 	}
 
 	exePath := filepath.Join(baseDir, "MUSHclient.exe")
@@ -3439,37 +3460,6 @@ func confirmAction(prompt string) bool {
 	return confirmed
 }
 
-
-// Branch represents a GitHub branch
-type Branch struct {
-	Name   string `json:"name"`
-	Commit struct {
-		SHA string `json:"sha"`
-		URL string `json:"url"`
-	} `json:"commit"`
-}
-
-func getBranches() ([]Branch, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/branches", githubOwner, githubRepo)
-
-	resp, err := httpClient.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch branches: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to fetch branches: HTTP %d", resp.StatusCode)
-	}
-
-	var branches []Branch
-	if err := json.NewDecoder(resp.Body).Decode(&branches); err != nil {
-		return nil, fmt.Errorf("failed to parse branches: %w", err)
-	}
-
-	return branches, nil
-}
-
 // ============================================================================
 // SECTION 10: CHANNEL MANAGEMENT
 // ============================================================================
@@ -3505,7 +3495,7 @@ func isValidChannel(channel string) bool {
 	}
 
 	// Check if it's a valid branch name
-	branches, err := getBranches()
+	branches, err := ghClient.GetBranches()
 	if err != nil {
 		// If we can't fetch branches, only allow stable/dev
 		return false
@@ -3557,7 +3547,7 @@ func promptInstallationMenu(existingInstallFound bool, detectedPath string, toas
 		response = strings.TrimSpace(response)
 		switch response {
 		case "1":
-playSoundAsync(selectSound, 0.0)
+			playSoundAsync(selectSound, 0.0)
 			return "1"
 		case "2":
 			playSoundAsync(selectSound, 0.0)
@@ -3643,14 +3633,14 @@ func promptForBranch() string {
 	fmt.Println()
 	fmt.Println("Fetching available branches...")
 
-	branches, err := getBranches()
+	branches, err := ghClient.GetBranches()
 	if err != nil {
 		fmt.Printf("Error fetching branches: %v\n", err)
 		return promptForChannel()
 	}
 
 	// Filter out main (that's "dev") and show others
-	var experimentalBranches []Branch
+	var experimentalBranches []github.Branch
 	for _, branch := range branches {
 		if branch.Name != "main" {
 			experimentalBranches = append(experimentalBranches, branch)
@@ -3815,7 +3805,6 @@ func getLocalVersion() (*Version, error) {
 	return &version, nil
 }
 
-
 // detectToastushInstallation attempts to find an existing Toastush installation
 func detectToastushInstallation() string {
 	// Check Documents folder
@@ -3972,7 +3961,10 @@ func handleToastushMigration(toastushDir string) error {
 				return fmt.Errorf("failed to kill MUSHclient: %w", err)
 			}
 			logProgress("MUSHclient killed successfully")
-			time.Sleep(1 * time.Second)
+			// Wait for process to fully terminate
+			if !waitForProcessToTerminate("MUSHclient.exe", 5*time.Second) {
+				logProgress("Warning: MUSHclient may not have fully terminated")
+			}
 		} else {
 			fmt.Println("\nMUSHclient is currently running and will be closed to proceed with migration.")
 			if confirmAction("Kill MUSHclient and continue?") {
@@ -3985,7 +3977,10 @@ func handleToastushMigration(toastushDir string) error {
 					return fmt.Errorf("failed to close MUSHclient: %w", err)
 				}
 				fmt.Println("MUSHclient closed successfully.")
-				time.Sleep(1 * time.Second)
+				// Wait for process to fully terminate
+				if !waitForProcessToTerminate("MUSHclient.exe", 5*time.Second) {
+					fmt.Println("Warning: MUSHclient may not have fully terminated")
+				}
 			} else {
 				fmt.Println("Migration cancelled. Please close MUSHclient and run the migration again.")
 				return ErrUserCancelled

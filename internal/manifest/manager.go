@@ -24,12 +24,12 @@ type TreeItem struct {
 
 // Config holds configuration for manifest operations
 type Config struct {
-	ManifestFile  string
-	WorldsDir     string
-	WorldFileExt  string
-	ChannelFlag   string
-	QuietFlag     bool
-	VerboseFlag   bool
+	ManifestFile string
+	WorldsDir    string
+	WorldFileExt string
+	ChannelFlag  string
+	QuietFlag    bool
+	VerboseFlag  bool
 }
 
 // Manager handles manifest operations

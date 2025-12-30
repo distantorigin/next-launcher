@@ -116,22 +116,46 @@ func (c *Client) GetHTTPClient() *http.Client {
 	return c.httpClient
 }
 
+// retryRequest performs a GET request with retries
+func (c *Client) retryRequest(url string, result interface{}, operation string) error {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+
+		resp, err := c.httpClient.Get(url)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to %s: %w", operation, err)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("failed to %s: HTTP %d", operation, resp.StatusCode)
+			continue
+		}
+
+		err = json.NewDecoder(resp.Body).Decode(result)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("failed to parse %s response: %w", operation, err)
+			continue
+		}
+
+		return nil
+	}
+	return lastErr
+}
+
 // GetLatestCommit fetches the latest commit for a given ref
 func (c *Client) GetLatestCommit(ref string) (*Commit, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits/%s", c.owner, c.repo, ref)
-	resp, err := c.httpClient.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch commit: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to fetch commit: HTTP %d", resp.StatusCode)
-	}
 
 	var commit Commit
-	if err := json.NewDecoder(resp.Body).Decode(&commit); err != nil {
-		return nil, fmt.Errorf("failed to parse commit: %w", err)
+	err := c.retryRequest(url, &commit, "fetch commit")
+	if err != nil {
+		return nil, err
 	}
 
 	return &commit, nil
@@ -140,19 +164,10 @@ func (c *Client) GetLatestCommit(ref string) (*Commit, error) {
 // CompareCommits compares two commits and returns the comparison
 func (c *Client) CompareCommits(base, head string) (*Comparison, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/compare/%s...%s", c.owner, c.repo, base, head)
-	resp, err := c.httpClient.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("failed to compare commits: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to compare commits: HTTP %d", resp.StatusCode)
-	}
 
 	var comparison Comparison
-	if err := json.NewDecoder(resp.Body).Decode(&comparison); err != nil {
-		return nil, fmt.Errorf("failed to parse comparison: %w", err)
+	if err := c.retryRequest(url, &comparison, "compare commits"); err != nil {
+		return nil, err
 	}
 
 	return &comparison, nil
@@ -170,19 +185,10 @@ func (c *Client) GetLastCommitDate(ref string) (string, error) {
 // GetLatestTag fetches the latest tag from the repository
 func (c *Client) GetLatestTag() (string, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/git/refs/tags", c.owner, c.repo)
-	resp, err := c.httpClient.Get(url)
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch tags: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("failed to fetch tags: HTTP %d", resp.StatusCode)
-	}
 
 	var refs []Ref
-	if err := json.NewDecoder(resp.Body).Decode(&refs); err != nil {
-		return "", fmt.Errorf("failed to parse tags: %w", err)
+	if err := c.retryRequest(url, &refs, "fetch tags"); err != nil {
+		return "", err
 	}
 
 	if len(refs) == 0 {
@@ -203,19 +209,10 @@ func (c *Client) GetLatestTag() (string, error) {
 // GetTree fetches the tree object for a given ref
 func (c *Client) GetTree(ref string) (*Tree, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/git/trees/%s?recursive=1", c.owner, c.repo, ref)
-	resp, err := c.httpClient.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch tree: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to fetch tree: HTTP %d", resp.StatusCode)
-	}
 
 	var tree Tree
-	if err := json.NewDecoder(resp.Body).Decode(&tree); err != nil {
-		return nil, fmt.Errorf("failed to parse tree: %w", err)
+	if err := c.retryRequest(url, &tree, "fetch tree"); err != nil {
+		return nil, err
 	}
 
 	return &tree, nil
@@ -229,19 +226,10 @@ func (c *Client) GetRawURL(tag string, path string) string {
 // GetBranches fetches all branches from the repository
 func (c *Client) GetBranches() ([]Branch, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/branches?per_page=100", c.owner, c.repo)
-	resp, err := c.httpClient.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch branches: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to fetch branches: HTTP %d", resp.StatusCode)
-	}
 
 	var branches []Branch
-	if err := json.NewDecoder(resp.Body).Decode(&branches); err != nil {
-		return nil, fmt.Errorf("failed to parse branches: %w", err)
+	if err := c.retryRequest(url, &branches, "fetch branches"); err != nil {
+		return nil, err
 	}
 
 	return branches, nil
