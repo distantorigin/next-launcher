@@ -31,6 +31,7 @@ import (
 	"github.com/distantorigin/next-launcher/internal/console"
 	"github.com/distantorigin/next-launcher/internal/github"
 	"github.com/distantorigin/next-launcher/internal/manifest"
+	"github.com/distantorigin/next-launcher/internal/paths"
 	"github.com/distantorigin/next-launcher/internal/process"
 )
 
@@ -539,40 +540,15 @@ func getRawURLForTag(tag string, path string) string {
 // ============================================================================
 
 func normalizePath(p string) string {
-	return strings.ReplaceAll(filepath.Clean(p), string(filepath.Separator), "/")
+	return paths.Normalize(p)
 }
 
 func denormalizePath(p string) string {
-	return strings.ReplaceAll(p, "/", string(filepath.Separator))
+	return paths.Denormalize(p)
 }
 
 func isUserConfigFile(path string) bool {
-	normalizedPath := strings.ToLower(normalizePath(path))
-
-	// User configuration files that should never be overwritten
-	userFiles := []string{
-		"mushclient_prefs.sqlite",
-		"mushclient.ini",
-	}
-
-	for _, userFile := range userFiles {
-		if normalizedPath == userFile {
-			return true
-		}
-	}
-
-	// .mcl files in worlds directory
-	if strings.HasPrefix(normalizedPath, worldsDir+"/") && strings.HasSuffix(normalizedPath, worldFileExt) {
-		return true
-	} else if strings.HasPrefix(normalizedPath, "worlds/plugins/state/") {
-		return true
-	} else if strings.HasPrefix(normalizedPath, "logs/") {
-		return true
-	} else if strings.HasPrefix(normalizedPath, "worlds/settings/") {
-		return true
-	}
-
-	return false
+	return paths.IsUserConfig(path)
 }
 
 func logProgress(format string, args ...interface{}) {
@@ -623,32 +599,8 @@ func writeUpdateSuccess(updates []manifest.FileInfo, deletedFiles []string, wasR
 	return os.WriteFile(resultPath, append(jsonData, '\n'), 0644)
 }
 
-// On case-insensitive filesystems, returns the actual case of the file
 func findActualPath(targetPath string) (string, error) {
-	// First try the path as-is
-	if _, err := os.Stat(targetPath); err == nil {
-		return targetPath, nil
-	}
-
-	// If not found and we're on Windows/case-insensitive, try case-insensitive search
-	dir := filepath.Dir(targetPath)
-	filename := filepath.Base(targetPath)
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		// Directory doesn't exist, return original path for creation
-		return targetPath, nil
-	}
-
-	// Search for matching filename (case-insensitive on case-insensitive systems)
-	for _, entry := range entries {
-		if strings.EqualFold(entry.Name(), filename) {
-			return filepath.Join(dir, entry.Name()), nil
-		}
-	}
-
-	// Not found, return original path for creation
-	return targetPath, nil
+	return paths.FindActual(targetPath)
 }
 
 func setConsoleTitle(title string) error {
