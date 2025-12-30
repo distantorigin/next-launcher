@@ -28,6 +28,7 @@ import (
 	"github.com/go-ole/go-ole/oleutil"
 
 	"github.com/distantorigin/next-launcher/internal/audio"
+	"github.com/distantorigin/next-launcher/internal/channel"
 	"github.com/distantorigin/next-launcher/internal/console"
 	"github.com/distantorigin/next-launcher/internal/github"
 	"github.com/distantorigin/next-launcher/internal/manifest"
@@ -3035,28 +3036,20 @@ func confirmAction(prompt string) bool {
 // SECTION 10: CHANNEL MANAGEMENT
 // ============================================================================
 
-func saveChannel(channel string) error {
+func saveChannel(ch string) error {
 	baseDir, err := os.Getwd()
 	if err != nil {
 		return err
 	}
-	channelPath := filepath.Join(baseDir, channelFile)
-	return os.WriteFile(channelPath, []byte(channel), 0644)
+	return channel.Save(baseDir, ch)
 }
 
-// loadChannel loads the saved channel from .update-channel file
 func loadChannel() (string, error) {
 	baseDir, err := os.Getwd()
 	if err != nil {
 		return "", err
 	}
-	channelPath := filepath.Join(baseDir, channelFile)
-	data, err := os.ReadFile(channelPath)
-	if err != nil {
-		return "", err
-	}
-	channel := strings.TrimSpace(string(data))
-	return channel, nil
+	return channel.Load(baseDir)
 }
 
 func isValidChannel(channel string) bool {
