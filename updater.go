@@ -3,7 +3,6 @@ package main
 import (
 	"archive/zip"
 	"bufio"
-	"bytes"
 	"crypto/sha1"
 	"crypto/sha256"
 	"embed"
@@ -23,18 +22,16 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/cavaliergopher/grab/v3"
 	"github.com/go-ole/go-ole"
 	"github.com/go-ole/go-ole/oleutil"
-	"github.com/gopxl/beep"
-	"github.com/gopxl/beep/effects"
-	"github.com/gopxl/beep/speaker"
-	"github.com/gopxl/beep/wav"
 
-	"updater/internal/github"
-	"updater/internal/manifest"
+	"github.com/distantorigin/next-launcher/internal/audio"
+	"github.com/distantorigin/next-launcher/internal/console"
+	"github.com/distantorigin/next-launcher/internal/github"
+	"github.com/distantorigin/next-launcher/internal/manifest"
+	"github.com/distantorigin/next-launcher/internal/process"
 )
 
 // ============================================================================
@@ -132,297 +129,56 @@ var selectSound []byte
 
 var (
 	_ embed.FS // Ensure embed package is recognized by compiler
-
-	speakerOnce      sync.Once
-	speakerReady     bool        // Set to true after speaker is initialized (thread-safe via sync.Once)
-	speakerFormat    beep.Format // Store the format for later use
-	backgroundVolume *effects.Volume
-	backgroundMutex  sync.Mutex
-)
-
-// Set up Windows API calls to attach or create a console window
-var (
-	kernel32           = syscall.NewLazyDLL("kernel32.dll")
-	user32             = syscall.NewLazyDLL("user32.dll")
-	attachConsole      = kernel32.NewProc("AttachConsole")
-	allocConsole       = kernel32.NewProc("AllocConsole")
-	freeConsole        = kernel32.NewProc("FreeConsole")
-	getStdHandle       = kernel32.NewProc("GetStdHandle")
-	showWindowProc     = user32.NewProc("ShowWindow")
-	SetFocusProc       = user32.NewProc("SetFocus")
-	hasConsoleAttached bool
-)
-
-const (
-	ATTACH_PARENT_PROCESS = ^uint32(0) // -1 as uint32
-	STD_INPUT_HANDLE      = ^uint32(0) - 10 + 1
-	STD_OUTPUT_HANDLE     = ^uint32(0) - 11 + 1
-	STD_ERROR_HANDLE      = ^uint32(0) - 12 + 1
-	SW_MAXIMIZE           = 3
 )
 
 // ============================================================================
-// SECTION 1: AUDIO/SOUND SYSTEM
+// SECTION 1: AUDIO/SOUND SYSTEM (delegated to internal/audio)
 // ============================================================================
 
-func ensureSpeakerInitialized(format beep.Format) {
-	speakerOnce.Do(func() {
-		if verboseFlag {
-			log.Println("Setting up audio...")
-		}
-		speaker.Init(format.SampleRate, format.SampleRate.N(time.Second/10))
-		speakerFormat = format // Store for potential future use
-		speakerReady = true    // Mark as initialized (thread-safe within sync.Once)
-	})
-}
-
-func decodeSoundData(soundData []byte) (beep.StreamSeekCloser, beep.Format, error) {
-	if len(soundData) == 0 {
-		if verboseFlag {
-			log.Println("Couldn't play sound (no data)")
-		}
-		return nil, beep.Format{}, fmt.Errorf("no sound data")
-	}
-
-	streamer, format, err := wav.Decode(bytes.NewReader(soundData))
-	if err != nil {
-		if verboseFlag {
-			log.Println("Sound file couldn't be decoded:", err)
-		}
-		return nil, beep.Format{}, err
-	}
-
-	return streamer, format, nil
-}
-
-// ============================================================================
-// SECTION 2: CONSOLE/UI
-// ============================================================================
-
-// initConsole tries to show a console window for output. If we're running from
-// a command line, it attaches to the parent console. Otherwise, it creates a new one.
-func initConsole() bool {
-	// Check if we already have a console (normal for non-GUI builds)
-	stdOutputHandle, _, _ := getStdHandle.Call(uintptr(STD_OUTPUT_HANDLE))
-	if stdOutputHandle != 0 && stdOutputHandle != uintptr(syscall.InvalidHandle) {
-		// Already good, we're in a console
-		return true
-	}
-
-	// Try to attach to parent console (we're running in a terminal)
-	attachSuccess, _, _ := attachConsole.Call(uintptr(ATTACH_PARENT_PROCESS))
-
-	wasAllocated := false
-	if attachSuccess == 0 {
-		// No parent console - we were double-clicked or launched without one
-		// Create a new console window for output
-		allocSuccess, _, _ := allocConsole.Call()
-		if allocSuccess == 0 {
-			// Failed to create console, continue without one
-			return false
-		}
-		wasAllocated = true
-	}
-
-	// Now grab the handles to stdout, stderr, and stdin
-	stdOutputHandle, _, _ = getStdHandle.Call(uintptr(STD_OUTPUT_HANDLE))
-	stdErrorHandle, _, _ := getStdHandle.Call(uintptr(STD_ERROR_HANDLE))
-	stdInputHandle, _, _ := getStdHandle.Call(uintptr(STD_INPUT_HANDLE))
-
-	if stdOutputHandle != 0 && stdOutputHandle != uintptr(syscall.InvalidHandle) {
-		os.Stdout = os.NewFile(stdOutputHandle, "/dev/stdout")
-	}
-	if stdErrorHandle != 0 && stdErrorHandle != uintptr(syscall.InvalidHandle) {
-		os.Stderr = os.NewFile(stdErrorHandle, "/dev/stderr")
-	}
-	if stdInputHandle != 0 && stdInputHandle != uintptr(syscall.InvalidHandle) {
-		os.Stdin = os.NewFile(stdInputHandle, "/dev/stdin")
-	}
-
-	// If we created a new console, maximize it and bring it to focus
-	if wasAllocated {
-		consoleWindowHandle := getConsoleWindow()
-		if consoleWindowHandle != 0 {
-			showWindowProc.Call(consoleWindowHandle, SW_MAXIMIZE)
-			showWindowProc.Call(consoleWindowHandle, 1)
-			SetFocusProc.Call(consoleWindowHandle)
-		}
-	}
-
-	return true
-}
+// Wrapper functions for audio package - these exist so we don't have to
+// update every call site in the codebase
 
 func playSound(soundData []byte) {
-	if quietFlag {
-		return
-	}
-
-	streamer, format, err := decodeSoundData(soundData)
-	if err != nil {
-		return
-	}
-	defer streamer.Close()
-
-	ensureSpeakerInitialized(format)
-
-	done := make(chan bool)
-	speaker.Play(beep.Seq(streamer, beep.Callback(func() {
-		done <- true
-	})))
-
-	if verboseFlag {
-		log.Println("Playing sound...")
-	}
-	<-done
-	if verboseFlag {
-		log.Println("Sound finished")
-	}
+	audio.Play(soundData)
 }
 
 func stopAllSounds() {
-	if !speakerReady {
-		return
-	}
-	speaker.Clear()
+	audio.StopAll()
 }
 
 func playSoundAsync(soundData []byte, volumeDB float64) {
-	playSoundAsyncLoop(soundData, volumeDB, false)
+	audio.PlayAsync(soundData, volumeDB)
 }
 
 func playSoundAsyncLoop(soundData []byte, volumeDB float64, loop bool) {
-	if quietFlag {
-		return
-	}
-
-	streamer, format, err := decodeSoundData(soundData)
-	if err != nil {
-		return
-	}
-
-	ensureSpeakerInitialized(format)
-
-	// Loop the sound if requested (for background music)
-	var finalStreamer beep.Streamer = streamer
-	if loop {
-		finalStreamer = beep.Loop(-1, streamer)
-	}
-
-	// Wrap the audio with volume control so we can adjust it later if needed
-	backgroundMutex.Lock()
-	backgroundVolume = &effects.Volume{
-		Streamer: finalStreamer,
-		Base:     2,
-		Volume:   volumeDB,
-		Silent:   false,
-	}
-	backgroundMutex.Unlock()
-
-	// Start playing in background without blocking
-	speaker.Play(beep.Seq(backgroundVolume, beep.Callback(func() {
-		streamer.Close()
-		backgroundMutex.Lock()
-		backgroundVolume = nil
-		backgroundMutex.Unlock()
-	})))
-
-	if verboseFlag {
-		if loop {
-			log.Println("Started looping background sound...")
-		} else {
-			log.Println("Started background sound...")
-		}
-	}
+	audio.PlayAsyncLoop(soundData, volumeDB, loop)
 }
 
 func playSoundWithDucking(soundData []byte, foregroundVolumeDB float64) {
-	if quietFlag {
-		return
-	}
-
-	streamer, format, err := decodeSoundData(soundData)
-	if err != nil {
-		return
-	}
-	defer streamer.Close()
-
-	ensureSpeakerInitialized(format)
-
-	// Lower the background sound so the foreground sound is more audible
-	backgroundMutex.Lock()
-	originalVolume := 0.0
-	if backgroundVolume != nil {
-		originalVolume = backgroundVolume.Volume
-		// Gradually reduce background volume over 300ms
-		go func() {
-			steps := 10
-			for i := 0; i < steps; i++ {
-				backgroundMutex.Lock()
-				if backgroundVolume != nil {
-					backgroundVolume.Volume = originalVolume - (5.0 * float64(i) / float64(steps))
-				}
-				backgroundMutex.Unlock()
-				time.Sleep(30 * time.Millisecond)
-			}
-		}()
-	}
-	backgroundMutex.Unlock()
-
-	// Wrap foreground sound with volume control
-	foregroundVolume := &effects.Volume{
-		Streamer: streamer,
-		Base:     2,
-		Volume:   foregroundVolumeDB,
-		Silent:   false,
-	}
-
-	done := make(chan bool)
-	speaker.Play(beep.Seq(foregroundVolume, beep.Callback(func() {
-		done <- true
-	})))
-
-	<-done
-
-	// Fade background back up over 500ms
-	backgroundMutex.Lock()
-	if backgroundVolume != nil {
-		go func() {
-			steps := 15
-			for i := 0; i < steps; i++ {
-				backgroundMutex.Lock()
-				if backgroundVolume != nil {
-					currentVol := originalVolume - 5.0 + (5.0 * float64(i) / float64(steps))
-					backgroundVolume.Volume = currentVol
-				}
-				backgroundMutex.Unlock()
-				time.Sleep(33 * time.Millisecond)
-			}
-			// Ensure we end up exactly at original volume
-			backgroundMutex.Lock()
-			if backgroundVolume != nil {
-				backgroundVolume.Volume = originalVolume
-			}
-			backgroundMutex.Unlock()
-		}()
-	}
-	backgroundMutex.Unlock()
-
-	if verboseFlag {
-		log.Println("Foreground sound finished, fading background back up")
-	}
+	audio.PlayWithDucking(soundData, foregroundVolumeDB)
 }
 
+// ============================================================================
+// SECTION 2: CONSOLE/UI (delegated to internal/console)
+// ============================================================================
+
+func initConsole() bool {
+	return console.Attach()
+}
+
+// Version info - set via linker flags: -ldflags "-X main.version=1.3.2"
+var version = "dev"
+
 const (
-	updaterVersion = "1.3.2"
-	githubOwner    = "distantorigin"
-	githubRepo     = "miriani-next"
-	manifestFile   = ".manifest"
-	versionFile    = "version.json"
-	excludesFile   = ".updater-excludes"
-	channelFile    = ".update-channel"
-	zipThreshold   = 30
-	fileWorkers    = 6
-	title          = "Miriani"
+	githubOwner  = "distantorigin"
+	githubRepo   = "miriani-next"
+	manifestFile = ".manifest"
+	versionFile  = "version.json"
+	excludesFile = ".updater-excludes"
+	channelFile  = ".update-channel"
+	zipThreshold = 30
+	fileWorkers  = 6
+	title        = "Miriani"
 
 	// World file and directory names
 	worldFileName = "miriani.mcl"
@@ -820,9 +576,7 @@ func isUserConfigFile(path string) bool {
 }
 
 func logProgress(format string, args ...interface{}) {
-	if !quietFlag {
-		fmt.Printf(format+"\n", args...)
-	}
+	console.Log(format, args...)
 }
 
 type UpdateResult struct {
@@ -898,48 +652,11 @@ func findActualPath(targetPath string) (string, error) {
 }
 
 func setConsoleTitle(title string) error {
-	if !hasConsoleAttached {
-		return nil
-	}
-	kernel32, err := syscall.LoadLibrary("kernel32.dll")
-	if err != nil {
-		return err
-	}
-	defer syscall.FreeLibrary(kernel32)
-
-	setConsoleTitleProc, err := syscall.GetProcAddress(kernel32, "SetConsoleTitleW")
-	if err != nil {
-		return err
-	}
-
-	titlePtr, err := syscall.UTF16PtrFromString(title)
-	if err != nil {
-		return err
-	}
-
-	r1, _, err := syscall.Syscall(setConsoleTitleProc, 1, uintptr(unsafe.Pointer(titlePtr)), 0, 0)
-	if r1 == 0 {
-		return fmt.Errorf("SetConsoleTitle failed: %v", err)
-	}
-
-	return nil
+	return console.SetTitle(title)
 }
 
-// getConsoleWindow gets the window handle for the console so dialogs appear on top of it
 func getConsoleWindow() uintptr {
-	kernel32, err := syscall.LoadLibrary("kernel32.dll")
-	if err != nil {
-		return 0
-	}
-	defer syscall.FreeLibrary(kernel32)
-
-	getConsoleWindowProc, err := syscall.GetProcAddress(kernel32, "GetConsoleWindow")
-	if err != nil {
-		return 0
-	}
-
-	consoleWindowHandle, _, _ := syscall.Syscall(getConsoleWindowProc, 0, 0, 0, 0)
-	return consoleWindowHandle
+	return console.GetWindow()
 }
 
 // ============================================================================
@@ -997,15 +714,14 @@ func main() {
 		flag.CommandLine.Parse(subcommandArgs)
 	}
 
-	// Initialize console attachment after parsing flags
-	// Always attach to console for output (even in non-interactive mode)
-	hasConsoleAttached = initConsole()
-	// Clean up console on exit
-	defer func() {
-		if hasConsoleAttached {
-			freeConsole.Call()
-		}
-	}()
+	// Initialize console and audio packages
+	console.Init(quietFlag)
+	audio.Init(quietFlag, verboseFlag, func(format string, args ...interface{}) {
+		log.Printf(format, args...)
+	})
+
+	// Attach to or create console for output
+	initConsole()
 
 	setConsoleTitle(title)
 	// Clean up old updater binary if this is a post-update restart
@@ -1153,7 +869,7 @@ func main() {
 
 	// If version flag is set, print version and exit
 	if versionFlag {
-		fmt.Printf("Miriani-Next Updater v%s\n", updaterVersion)
+		fmt.Printf("Miriani-Next Updater v%s\n", version)
 		return
 	}
 
@@ -1704,7 +1420,7 @@ func main() {
 // selfUpdate checks for a new version of the updater itself and replaces it if a new version is available.
 // This function fails silently with a short timeout to avoid blocking the main update process.
 func selfUpdate() error {
-	const updaterVersionURL = "https://anomalousabode.com/next/updater-version"
+	const versionURL = "https://anomalousabode.com/next/updater-version"
 	const updaterBinaryURL = "https://anomalousabode.com/next/updater"
 	const updaterHashURL = "https://anomalousabode.com/next/updater.sha256"
 
@@ -1727,7 +1443,7 @@ func selfUpdate() error {
 	}
 
 	// Make a request to the update URL
-	resp, err := quickClient.Get(updaterVersionURL)
+	resp, err := quickClient.Get(versionURL)
 	if err != nil {
 		// Silent failure - network issues, server down, etc.
 		return nil
@@ -1746,7 +1462,7 @@ func selfUpdate() error {
 	}
 
 	remoteVersion := strings.TrimSpace(string(versionData))
-	if remoteVersion == "" || remoteVersion == updaterVersion {
+	if remoteVersion == "" || remoteVersion == version {
 		return nil
 	}
 
@@ -2824,38 +2540,11 @@ func copyUpdaterToInstallation(installDir string) error {
 }
 
 // ============================================================================
-// SECTION 7: PROCESS DETECTION
+// SECTION 7: PROCESS DETECTION (delegated to internal/process)
 // ============================================================================
 
 func isProxianiRunning() bool {
-	// Check if node.exe is running
-	cmd := exec.Command("tasklist", "/FI", "IMAGENAME eq node.exe", "/FO", "CSV", "/NH")
-	output, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-
-	// If no node.exe processes, Proxiani is not running
-	if !strings.Contains(string(output), "node.exe") {
-		return false
-	}
-
-	// Check if port 1234 is in use by getting PID from netstat
-	cmd = exec.Command("netstat", "-ano", "-p", "tcp")
-	output, err = cmd.Output()
-	if err != nil {
-		return false
-	}
-
-	// Look for port 1234 listening
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		if strings.Contains(line, ":"+proxianiPort) && strings.Contains(line, "LISTENING") {
-			return true
-		}
-	}
-
-	return false
+	return process.IsNodeListeningOnPort(proxianiPort)
 }
 
 // ============================================================================
@@ -2895,26 +2584,8 @@ func updateWorldFileForProxiani(worldFilePath string) error {
 	return updateWorldFile(worldFilePath, false)
 }
 
-// ------------------------
-// MUDMIXER DETECTION
-// ------------------------
 func isMUDMixerRunning() bool {
-	// Check if port 7788 is in use by getting info from netstat
-	cmd := exec.Command("netstat", "-ano", "-p", "tcp")
-	output, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-
-	// Look for port 7788 listening
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		if strings.Contains(line, ":"+mudMixerPort) && strings.Contains(line, "LISTENING") {
-			return true
-		}
-	}
-
-	return false
+	return process.IsPortListening(mudMixerPort)
 }
 
 func updateWorldFileForMUDMixer(worldFilePath string) error {
@@ -3009,33 +2680,7 @@ func needsToUpdateMUSHClientExe(updates []manifest.FileInfo) bool {
 }
 
 func isMUSHClientRunningInDir(targetDir string) bool {
-	expectedPath := filepath.Join(targetDir, "MUSHclient.exe")
-	expectedPath = strings.ToLower(filepath.Clean(expectedPath))
-
-	// Use WMIC to get all running MUSHclient.exe processes with their full paths
-	cmd := exec.Command("wmic", "process", "where", "name='MUSHclient.exe'", "get", "ExecutablePath", "/format:list")
-	output, err := cmd.Output()
-	if err != nil {
-		// WMIC might fail if no processes found or other errors
-		return false
-	}
-
-	// Parse output - format is "ExecutablePath=C:\path\to\MUSHclient.exe"
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "ExecutablePath=") {
-			processPath := strings.TrimPrefix(line, "ExecutablePath=")
-			processPath = strings.ToLower(filepath.Clean(processPath))
-
-			// Check if this MUSHclient.exe is running from the target directory
-			if processPath == expectedPath {
-				return true
-			}
-		}
-	}
-
-	return false
+	return process.IsMUSHClientRunningInDir(targetDir)
 }
 
 func isMUSHClientRunning() bool {
@@ -3043,32 +2688,11 @@ func isMUSHClientRunning() bool {
 	if err != nil {
 		return false
 	}
-	return isMUSHClientRunningInDir(baseDir)
+	return process.IsMUSHClientRunningInDir(baseDir)
 }
 
-// waitForProcessToTerminate polls until the specified process is no longer running
-// Returns true if process terminated, false if timeout occurred
 func waitForProcessToTerminate(processName string, timeout time.Duration) bool {
-	start := time.Now()
-	for time.Since(start) < timeout {
-		// Check if any instance of the process is still running
-		cmd := exec.Command("tasklist", "/FI", fmt.Sprintf("IMAGENAME eq %s", processName), "/NH")
-		output, err := cmd.Output()
-		if err != nil {
-			// If tasklist fails, assume process is not running
-			return true
-		}
-
-		// If the process name doesn't appear in output, it's terminated
-		outputStr := strings.ToLower(string(output))
-		if !strings.Contains(outputStr, strings.ToLower(processName)) {
-			return true
-		}
-
-		// Wait a bit before checking again
-		time.Sleep(100 * time.Millisecond)
-	}
-	return false
+	return process.WaitForTermination(processName, timeout)
 }
 
 func launchMUSHClient() error {
@@ -3352,13 +2976,8 @@ func showChangelog(updates []manifest.FileInfo, deletedFiles []string) {
 	}
 }
 
-// waitForUser prompts the user to press Enter to continue
 func waitForUser(prompt string) {
-	if nonInteractive {
-		return
-	}
-	fmt.Print(prompt)
-	bufio.NewReader(os.Stdin).ReadBytes('\n')
+	console.WaitForKey(prompt, nonInteractive)
 }
 
 // ============================================================================
