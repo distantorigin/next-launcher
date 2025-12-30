@@ -31,6 +31,7 @@ import (
 	"github.com/distantorigin/next-launcher/internal/channel"
 	"github.com/distantorigin/next-launcher/internal/console"
 	"github.com/distantorigin/next-launcher/internal/github"
+	"github.com/distantorigin/next-launcher/internal/install"
 	"github.com/distantorigin/next-launcher/internal/manifest"
 	"github.com/distantorigin/next-launcher/internal/paths"
 	"github.com/distantorigin/next-launcher/internal/process"
@@ -2504,33 +2505,15 @@ func isProxianiRunning() bool {
 // SECTION 8: WORLD FILE UPDATES
 // ============================================================================
 
+var worldFileConfig = install.WorldFileConfig{
+	DefaultServer: defaultServer,
+	LocalServer:   localServer,
+	ProxianiPort:  proxianiPort,
+	MUDMixerPort:  mudMixerPort,
+}
+
 func updateWorldFile(worldFilePath string, updatePort bool) error {
-	data, err := os.ReadFile(worldFilePath)
-	if err != nil {
-		return fmt.Errorf("failed to read world file: %w", err)
-	}
-
-	content := string(data)
-
-	// Replace toastsoft.net with localhost in the site attribute
-	updatedContent := strings.ReplaceAll(content, `site="`+defaultServer+`"`, `site="`+localServer+`"`)
-
-	// Update port to 7788 for MUDMixer if requested
-	if updatePort {
-		updatedContent = strings.ReplaceAll(updatedContent, `port="`+proxianiPort+`"`, `port="`+mudMixerPort+`"`)
-	}
-
-	// Check if anything was actually changed
-	if updatedContent == content {
-		return fmt.Errorf("no " + defaultServer + " references found in world file")
-	}
-
-	// Write back to file
-	if err := os.WriteFile(worldFilePath, []byte(updatedContent), 0644); err != nil {
-		return fmt.Errorf("failed to write world file: %w", err)
-	}
-
-	return nil
+	return install.UpdateWorldFile(worldFilePath, updatePort, worldFileConfig)
 }
 
 func updateWorldFileForProxiani(worldFilePath string) error {
@@ -2554,36 +2537,7 @@ func isInstalled() bool {
 	if err != nil {
 		return false
 	}
-
-	// Check if current directory has the key files for an installation
-	// We check for actual game files, NOT just .manifest (which can be deleted/corrupted)
-	hasMUSHclient := false
-	hasWorlds := false
-	hasManifest := false
-
-	// Check for MUSHclient.exe (case-insensitive)
-	if _, err := os.Stat(filepath.Join(baseDir, "MUSHclient.exe")); err == nil {
-		hasMUSHclient = true
-	} else if _, err := os.Stat(filepath.Join(baseDir, "mushclient.exe")); err == nil {
-		hasMUSHclient = true
-	}
-
-	if info, err := os.Stat(filepath.Join(baseDir, "worlds")); err == nil && info.IsDir() {
-		hasWorlds = true
-	}
-
-	if _, err := os.Stat(filepath.Join(baseDir, manifestFile)); err == nil {
-		hasManifest = true
-	}
-
-	// If we have MUSHclient.exe AND worlds directory, it's installed
-	// OR if we have MUSHclient.exe AND .manifest, it's installed
-	// .manifest is for tracking updates
-	if hasMUSHclient && (hasWorlds || hasManifest) {
-		return true
-	}
-
-	return false
+	return install.IsInstalled(baseDir)
 }
 
 func hasWorldFilesInCurrentDir() bool {
@@ -2591,32 +2545,7 @@ func hasWorldFilesInCurrentDir() bool {
 	if err != nil {
 		return false
 	}
-
-	// Check for MUSHclient.exe as a primary indicator of installation
-	mushclientPath := filepath.Join(baseDir, "MUSHclient.exe")
-	if _, err := os.Stat(mushclientPath); err == nil {
-		return true
-	}
-
-	worldsDir := filepath.Join(baseDir, "worlds")
-	// Check if worlds directory exists
-	if info, err := os.Stat(worldsDir); err != nil || !info.IsDir() {
-		return false
-	}
-
-	// Check if there are any .mcl files in worlds directory
-	entries, err := os.ReadDir(worldsDir)
-	if err != nil {
-		return false
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), worldFileExt) {
-			return true
-		}
-	}
-
-	return false
+	return install.HasWorldFiles(baseDir)
 }
 
 // ============================================================================
@@ -2683,31 +2612,8 @@ func matchesExclusionPattern(path string, excludes map[string]struct{}) bool {
 	return paths.MatchesExclusion(path, excludes)
 }
 
-// ------------------------
-// BATCH FILE GENERATION
-// ------------------------
 func createChannelSwitchBatchFiles(installDir string) error {
-	// Create switch-to-stable.bat
-	stableBat := filepath.Join(installDir, "Switch to Stable.bat")
-	stableContent := "@echo off\nupdate.exe switch stable\n"
-	if err := os.WriteFile(stableBat, []byte(stableContent), 0644); err != nil {
-		return fmt.Errorf("failed to create switch-to-stable.bat: %w", err)
-	}
-
-	// Create Switch to Dev.bat
-	devBat := filepath.Join(installDir, "Switch to Dev.bat")
-	devContent := "@echo off\nupdate.exe switch dev\n"
-	if err := os.WriteFile(devBat, []byte(devContent), 0644); err != nil {
-		return fmt.Errorf("failed to create switch-to-dev.bat: %w", err)
-	}
-
-	anyBat := filepath.Join(installDir, "Switch to Any Channel.bat")
-	anyContent := "@echo off\nupdate.exe switch\n"
-	if err := os.WriteFile(anyBat, []byte(anyContent), 0644); err != nil {
-		return fmt.Errorf("failed to create switch-to-dev.bat: %w", err)
-	}
-
-	return nil
+	return install.CreateChannelSwitchBatchFiles(installDir)
 }
 
 // ------------------------
