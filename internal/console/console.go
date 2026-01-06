@@ -151,7 +151,7 @@ func WaitForKey(prompt string, nonInteractive bool) {
 		return
 	}
 	fmt.Print(prompt)
-	bufio.NewReader(os.Stdin).ReadBytes('\n')
+	_, _ = bufio.NewReader(os.Stdin).ReadBytes('\n')
 }
 
 // Log prints a message if not in quiet mode

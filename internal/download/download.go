@@ -80,10 +80,12 @@ func ToTemp(url, prefix string) (string, error) {
 		return "", fmt.Errorf("failed to create temp file: %w", err)
 	}
 	tempPath := tempFile.Name()
-	tempFile.Close()
+	if err := tempFile.Close(); err != nil {
+		return "", fmt.Errorf("failed to close temp file: %w", err)
+	}
 
 	if err := File(url, tempPath); err != nil {
-		os.Remove(tempPath)
+		_ = os.Remove(tempPath) // Best effort cleanup
 		return "", err
 	}
 
@@ -97,10 +99,12 @@ func ToTempWithProgress(url, prefix string, callback ProgressCallback) (string, 
 		return "", fmt.Errorf("failed to create temp file: %w", err)
 	}
 	tempPath := tempFile.Name()
-	tempFile.Close()
+	if err := tempFile.Close(); err != nil {
+		return "", fmt.Errorf("failed to close temp file: %w", err)
+	}
 
 	if err := FileWithProgress(url, tempPath, callback); err != nil {
-		os.Remove(tempPath)
+		_ = os.Remove(tempPath) // Best effort cleanup
 		return "", err
 	}
 
