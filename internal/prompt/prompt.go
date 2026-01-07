@@ -186,7 +186,7 @@ type ChannelInfo struct {
 // Returns "stable", "dev", or a branch name
 func ChannelMenu(info ChannelInfo, getBranches func() ([]github.Branch, error), cfg Config) string {
 	if info.ForFutureUpdates {
-		fmt.Println("\nSelect Update Channel (for future updates)")
+		fmt.Println("\nSelect Update Channel for future updates")
 	} else {
 		fmt.Println("\nMiriani-Next Update Channel Selection")
 	}

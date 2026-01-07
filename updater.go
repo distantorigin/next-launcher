@@ -3049,11 +3049,16 @@ func installFromEmbedded(installDir string, embeddedVersion string) (string, err
 	total := 0
 	err := embedded.ExtractTo(installDir, func(cur, tot int, filename string) {
 		total = tot
+		percentage := (cur * 100) / tot
+
+		// Update title bar with progress
+		console.SetTitle(fmt.Sprintf("%s - Extracting: %d%%", title, percentage))
+
 		if !quietFlag {
 			if verboseFlag {
-				fmt.Printf("  [%d/%d] %s\n", cur, tot, filename)
-			} else if cur%100 == 0 || cur == tot {
-				fmt.Printf("\rExtracting: %d/%d files...", cur, tot)
+				fmt.Printf("[%d/%d] (%d%%) %s\n", cur, tot, percentage, filename)
+			} else {
+				fmt.Printf("\rProgress: %d/%d (%d%%)    ", cur, tot, percentage)
 			}
 		}
 	})
@@ -3062,8 +3067,9 @@ func installFromEmbedded(installDir string, embeddedVersion string) (string, err
 	}
 
 	if !quietFlag && !verboseFlag {
-		fmt.Printf("\rExtracted %d files.                    \n", total)
+		fmt.Printf("\n") // New line after progress
 	}
+	fmt.Printf("Extracted %d files.\n", total)
 
 	// Change to installation directory
 	originalDir, err := os.Getwd()
