@@ -15,11 +15,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Get version
-        id: version
-        shell: bash
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -29,12 +24,10 @@ jobs:
         run: go test ./...
 
       - name: Build
-        run: |
-          go build -ldflags="-s -w" -o miriani.exe
-          copy miriani.exe miriani-${{ steps.version.outputs.VERSION }}.exe
+        run: go build -ldflags="-s -w" -o miriani.exe
 
       - name: Create Release
         uses: ncipollo/release-action@v1
         with:
-          artifacts: './miriani.exe,./miriani-${{ steps.version.outputs.VERSION }}.exe'
+          artifacts: './miriani.exe'
           draft: true
