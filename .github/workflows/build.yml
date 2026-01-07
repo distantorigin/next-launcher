@@ -35,4 +35,3 @@ jobs:
         with:
           artifacts: './miriani.exe,./miriani-${{ steps.version.outputs.VERSION }}.exe'
           draft: true
-          generateReleaseNotes: true
