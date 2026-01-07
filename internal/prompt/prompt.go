@@ -177,14 +177,19 @@ func InstallationMenu(existingInstallFound bool, detectedPath string, toastushPa
 
 // ChannelInfo provides info about a channel for display
 type ChannelInfo struct {
-	StableDate string
-	DevDate    string
+	StableDate       string
+	DevDate          string
+	ForFutureUpdates bool // When true, indicates channel selection is for future updates only
 }
 
 // ChannelMenu displays an interactive menu to select update channel
 // Returns "stable", "dev", or a branch name
 func ChannelMenu(info ChannelInfo, getBranches func() ([]github.Branch, error), cfg Config) string {
-	fmt.Println("\nMiriani-Next Update Channel Selection")
+	if info.ForFutureUpdates {
+		fmt.Println("\nSelect Update Channel (for future updates)")
+	} else {
+		fmt.Println("\nMiriani-Next Update Channel Selection")
+	}
 	fmt.Println()
 	fmt.Println("Update channels control how often you receive updates:")
 	fmt.Println()

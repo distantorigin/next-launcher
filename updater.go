@@ -1966,9 +1966,17 @@ func handleInstallation() (string, error) {
 
 	fmt.Println("Welcome to the Miriani-Next installer.")
 
+	// Check for embedded data early
+	hasEmbedded := embedded.HasData()
+	embeddedVersion := ""
+	if hasEmbedded {
+		embeddedVersion = embedded.GetVersion()
+		fmt.Printf("\nOffline installer - installing v%s\n", embeddedVersion)
+	}
+
 	// If no channel was explicitly set, prompt for selection during fresh install
 	if !channelExplicitlySet && !nonInteractive {
-		channelFlag = promptForChannel()
+		channelFlag = promptForChannelWithOptions(hasEmbedded)
 	}
 
 	// Determine installation directory
@@ -2028,19 +2036,9 @@ func handleInstallation() (string, error) {
 		fmt.Printf("\nInstalling to: %s\n", installDir)
 	}
 
-	// Check if embedded data is available for offline installation
-	if embedded.HasData() {
-		embeddedVersion := embedded.GetVersion()
-		useEmbedded := true
-
-		if !nonInteractive {
-			fmt.Printf("\nOffline installer detected (v%s included).\n", embeddedVersion)
-			useEmbedded = confirmAction("Use embedded files for faster installation?")
-		}
-
-		if useEmbedded {
-			return installFromEmbedded(installDir, embeddedVersion)
-		}
+	// Use embedded data if available (offline installer)
+	if hasEmbedded {
+		return installFromEmbedded(installDir, embeddedVersion)
 	}
 
 	// Get the appropriate zipball
@@ -2555,7 +2553,13 @@ func promptInstallationMenu(existingInstallFound bool, detectedPath string, toas
 }
 
 func promptForChannel() string {
-	info := prompt.ChannelInfo{}
+	return promptForChannelWithOptions(false)
+}
+
+func promptForChannelWithOptions(forFutureUpdates bool) string {
+	info := prompt.ChannelInfo{
+		ForFutureUpdates: forFutureUpdates,
+	}
 	if tag, err := getLatestTag(); err == nil {
 		if date, err := getLastCommitDate(tag); err == nil {
 			info.StableDate = date
