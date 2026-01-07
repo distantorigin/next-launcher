@@ -1,0 +1,40 @@
+name: Build
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          go build -ldflags="-s -w" -o miriani.exe
+          cp miriani.exe miriani-${{ steps.version.outputs.VERSION }}.exe
+
+      - name: Create Release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: './miriani.exe,./miriani-${{ steps.version.outputs.VERSION }}.exe'
+          draft: true
+          generateReleaseNotes: true

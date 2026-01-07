@@ -3136,11 +3136,11 @@ func installFromEmbedded(installDir string, embeddedVersion string) (string, err
 	return installDir, nil
 }
 
-// downloadSlimUpdater downloads the regular updater.exe from GitHub releases.
+// downloadSlimUpdater downloads miriani.exe from GitHub releases and saves as updater.exe.
 // This replaces the fat offline installer with the slim updater for future updates.
 func downloadSlimUpdater(installDir string) error {
 	// GitHub releases URL for latest updater
-	updaterURL := "https://github.com/distantorigin/next-launcher/releases/latest/download/updater.exe"
+	updaterURL := "https://github.com/distantorigin/next-launcher/releases/latest/download/miriani.exe"
 	targetPath := filepath.Join(installDir, "updater.exe")
 
 	// Download to temp file first
