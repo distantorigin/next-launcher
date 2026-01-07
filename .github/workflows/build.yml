@@ -7,13 +7,14 @@ on:
 jobs:
   build:
     name: Build
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Get version
         id: version
+        shell: bash
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
       - name: Set up Go
@@ -25,12 +26,9 @@ jobs:
         run: go test ./...
 
       - name: Build
-        env:
-          GOOS: windows
-          GOARCH: amd64
         run: |
           go build -ldflags="-s -w" -o miriani.exe
-          cp miriani.exe miriani-${{ steps.version.outputs.VERSION }}.exe
+          copy miriani.exe miriani-${{ steps.version.outputs.VERSION }}.exe
 
       - name: Create Release
         uses: ncipollo/release-action@v1

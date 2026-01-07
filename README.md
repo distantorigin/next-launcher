@@ -1,6 +1,6 @@
 # Miriani-Next Updater
 
-A Windows-based auto-updater and launcher for the Miriani-Next MUSHclient gaming application. This updater provides robust update management, installation handling, and seamless channel switching between stable releases and development builds.
+A Windows-based auto-updater and launcher for the Miriani-Next scripts. This updater provides robust update management, installation handling, and seamless channel switching between stable releases and development builds.
 
 ## Features
 
