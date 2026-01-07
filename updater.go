@@ -26,6 +26,7 @@ import (
 	"github.com/distantorigin/next-launcher/internal/audio"
 	"github.com/distantorigin/next-launcher/internal/changelog"
 	"github.com/distantorigin/next-launcher/internal/channel"
+	"github.com/distantorigin/next-launcher/internal/embedded"
 	"github.com/distantorigin/next-launcher/internal/console"
 	"github.com/distantorigin/next-launcher/internal/github"
 	"github.com/distantorigin/next-launcher/internal/install"
@@ -2027,6 +2028,21 @@ func handleInstallation() (string, error) {
 		fmt.Printf("\nInstalling to: %s\n", installDir)
 	}
 
+	// Check if embedded data is available for offline installation
+	if embedded.HasData() {
+		embeddedVersion := embedded.GetVersion()
+		useEmbedded := true
+
+		if !nonInteractive {
+			fmt.Printf("\nOffline installer detected (v%s included).\n", embeddedVersion)
+			useEmbedded = confirmAction("Use embedded files for faster installation?")
+		}
+
+		if useEmbedded {
+			return installFromEmbedded(installDir, embeddedVersion)
+		}
+	}
+
 	// Get the appropriate zipball
 	zipURL, err := getZipURLForChannel()
 	if err != nil {
@@ -3010,6 +3026,151 @@ func createDesktopIcon(targetDir string) error {
 	_, err = oleutil.CallMethod(linkDisp, "Save")
 	if err != nil {
 		return fmt.Errorf("failed to save shortcut: %w", err)
+	}
+
+	return nil
+}
+
+// installFromEmbedded installs using embedded release data (offline installer).
+// The embedded ZIP should contain .manifest and version.json from the release.
+func installFromEmbedded(installDir string, embeddedVersion string) (string, error) {
+	if !quietFlag {
+		fmt.Printf("\nInstalling from embedded files (v%s)...\n", embeddedVersion)
+	}
+
+	// Play installation sound
+	playSound(installingSound)
+
+	// Extract embedded files (includes .manifest and version.json if present)
+	total := 0
+	err := embedded.ExtractTo(installDir, func(cur, tot int, filename string) {
+		total = tot
+		if !quietFlag {
+			if verboseFlag {
+				fmt.Printf("  [%d/%d] %s\n", cur, tot, filename)
+			} else if cur%100 == 0 || cur == tot {
+				fmt.Printf("\rExtracting: %d/%d files...", cur, tot)
+			}
+		}
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to extract embedded files: %w", err)
+	}
+
+	if !quietFlag && !verboseFlag {
+		fmt.Printf("\rExtracted %d files.                    \n", total)
+	}
+
+	// Change to installation directory
+	originalDir, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to get current directory: %w", err)
+	}
+	if err := os.Chdir(installDir); err != nil {
+		return "", fmt.Errorf("failed to change to installation directory: %w", err)
+	}
+	defer os.Chdir(originalDir)
+
+	// Check if manifest was extracted, if not generate one
+	if _, err := os.Stat(manifestFile); os.IsNotExist(err) {
+		if !quietFlag {
+			fmt.Println("Generating manifest...")
+		}
+		if err := saveManifest(); err != nil {
+			fmt.Printf("Warning: failed to generate manifest: %v\n", err)
+		}
+	} else if !quietFlag && verboseFlag {
+		fmt.Println("Using embedded manifest")
+	}
+
+	// Check if version.json was extracted, if not create one
+	if _, err := os.Stat(versionFile); os.IsNotExist(err) {
+		ver := &version.Version{}
+		if major, minor, patch, err := version.ParseTag("v" + embeddedVersion); err == nil {
+			ver.Major = major
+			ver.Minor = minor
+			ver.Patch = patch
+		}
+		if data, err := json.MarshalIndent(ver, "", "  "); err == nil {
+			os.WriteFile(versionFile, data, 0644)
+		}
+	}
+
+	// Save channel preference (default to stable for offline installs)
+	if channelFlag == "" {
+		channelFlag = "stable"
+	}
+	if err := saveChannel(channelFlag); err != nil {
+		fmt.Printf("Warning: failed to save channel preference: %v\n", err)
+	}
+
+	// Create .updater-excludes file if it doesn't exist
+	if _, err := os.Stat(excludesFile); os.IsNotExist(err) {
+		if err := createUpdaterExcludes(); err != nil {
+			fmt.Printf("Warning: failed to create .updater-excludes: %v\n", err)
+		}
+	}
+
+	// Create channel switching batch files
+	if err := install.CreateChannelSwitchBatchFiles(installDir); err != nil {
+		fmt.Printf("Warning: failed to create channel switch batch files: %v\n", err)
+	}
+
+	// Download slim updater to replace the fat offline installer
+	if !quietFlag {
+		fmt.Println("Downloading updater...")
+	}
+	if err := downloadSlimUpdater(installDir); err != nil {
+		fmt.Printf("Warning: failed to download updater: %v\n", err)
+		fmt.Println("You can manually download it from: https://github.com/distantorigin/next-launcher/releases")
+	}
+
+	if !quietFlag {
+		fmt.Println("\nInstallation complete!")
+		fmt.Println("Location:", installDir)
+		fmt.Printf("Version: %s (offline installer)\n", embeddedVersion)
+	}
+
+	playSound(successSound)
+
+	return installDir, nil
+}
+
+// downloadSlimUpdater downloads the regular updater.exe from GitHub releases.
+// This replaces the fat offline installer with the slim updater for future updates.
+func downloadSlimUpdater(installDir string) error {
+	// GitHub releases URL for latest updater
+	updaterURL := "https://github.com/distantorigin/next-launcher/releases/latest/download/updater.exe"
+	targetPath := filepath.Join(installDir, "updater.exe")
+
+	// Download to temp file first
+	resp, err := http.Get(updaterURL)
+	if err != nil {
+		return fmt.Errorf("failed to download: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download failed: HTTP %d", resp.StatusCode)
+	}
+
+	// Create temp file in same directory (for atomic rename)
+	tmpFile, err := os.CreateTemp(installDir, "updater-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath) // Clean up on error
+
+	_, err = io.Copy(tmpFile, resp.Body)
+	tmpFile.Close()
+	if err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+
+	// Rename to final location
+	if err := os.Rename(tmpPath, targetPath); err != nil {
+		return fmt.Errorf("failed to rename: %w", err)
 	}
 
 	return nil
