@@ -62,7 +62,6 @@ import (
 //
 // 3. GITHUB API (wrappers for internal/github)
 //    - getLatestCommit, compareCommits, getLastCommitDate, validateChannelSwitch,
-//      getCommitsSinceLastUpdate, formatCommitAsCliffNote, generateCliffNotes,
 //      getLatestTag, getZipURLForChannel, getGitHubTree, getRawURLForTag
 //
 // 4. MANIFEST MANAGEMENT
@@ -438,73 +437,6 @@ func validateChannelSwitch(fromChannel, toChannel string) error {
 	}
 
 	return nil
-}
-
-func getCommitsSinceLastUpdate() ([]github.Commit, error) {
-	localVer, err := getLocalVersion()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get local version: %w", err)
-	}
-
-	latestVer, err := getLatestVersion()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get latest version: %w", err)
-	}
-
-	// Only works for dev/experimental branches with commit info
-	if latestVer.Commit == "" {
-		return nil, nil
-	}
-
-	// If local version has no commit (e.g., just switched from stable), use the branch head
-	var baseRef string
-	if localVer.Commit == "" {
-		// Use the branch name to get all recent commits
-		baseRef = channelFlag
-		if baseRef == "dev" {
-			baseRef = "main"
-		}
-		// Get last 10 commits from the branch
-		url := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits?sha=%s&per_page=10",
-			githubOwner, githubRepo, baseRef)
-		resp, err := httpClient.Get(url)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get recent commits: %w", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("failed to get recent commits: HTTP %d", resp.StatusCode)
-		}
-
-		data, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read commits: %w", err)
-		}
-
-		var commits []github.Commit
-		if err := json.Unmarshal(data, &commits); err != nil {
-			return nil, fmt.Errorf("failed to parse commits: %w", err)
-		}
-
-		return commits, nil
-	}
-
-	// Compare commits
-	comparison, err := compareCommits(localVer.Commit, latestVer.Commit)
-	if err != nil {
-		return nil, err
-	}
-
-	return comparison.Commits, nil
-}
-
-func formatCommitAsCliffNote(commit github.Commit) string {
-	return changelog.FormatCommitAsCliffNote(commit)
-}
-
-func generateCliffNotes(commits []github.Commit) string {
-	return changelog.GenerateCliffNotes(commits)
 }
 
 func getLatestTag() (string, error) {
@@ -2521,8 +2453,7 @@ func createUpdaterExcludes() error {
 
 func buildChangelog(updates []manifest.FileInfo, deletedFiles []string) string {
 	return changelog.Build(updates, deletedFiles, changelog.BuildConfig{
-		Channel:               channelFlag,
-		GetCommitsSinceUpdate: getCommitsSinceLastUpdate,
+		Channel: channelFlag,
 	})
 }
 
