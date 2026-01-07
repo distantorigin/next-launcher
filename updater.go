@@ -2,11 +2,8 @@ package main
 
 import (
 	"archive/zip"
-	"bufio"
 	"crypto/sha1"
-	"crypto/sha256"
 	"embed"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -17,7 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -28,6 +24,7 @@ import (
 	"github.com/go-ole/go-ole/oleutil"
 
 	"github.com/distantorigin/next-launcher/internal/audio"
+	"github.com/distantorigin/next-launcher/internal/changelog"
 	"github.com/distantorigin/next-launcher/internal/channel"
 	"github.com/distantorigin/next-launcher/internal/console"
 	"github.com/distantorigin/next-launcher/internal/github"
@@ -35,23 +32,35 @@ import (
 	"github.com/distantorigin/next-launcher/internal/manifest"
 	"github.com/distantorigin/next-launcher/internal/paths"
 	"github.com/distantorigin/next-launcher/internal/process"
+	"github.com/distantorigin/next-launcher/internal/prompt"
+	"github.com/distantorigin/next-launcher/internal/selfupdate"
+	"github.com/distantorigin/next-launcher/internal/version"
 )
 
 // ============================================================================
 // FUNCTION INDEX
 // ============================================================================
-// This file contains the entire updater application logic (~4200 lines).
+// This file contains the updater application logic (~3400 lines).
+// Core functionality is delegated to internal packages:
+//   - internal/audio: Sound playback
+//   - internal/channel: Update channel persistence
+//   - internal/console: Console I/O and title
+//   - internal/github: GitHub API client
+//   - internal/install: Installation, world files, batch scripts
+//   - internal/manifest: Manifest management
+//   - internal/paths: Path normalization and exclusions
+//   - internal/process: Process detection
+//   - internal/selfupdate: Self-update mechanism
+//   - internal/version: Version parsing and management
+//
 // Use this index to navigate to major sections:
 //
-// 1. AUDIO/SOUND SYSTEM
-//    - ensureSpeakerInitialized, decodeSoundData, playSound, stopAllSounds,
-//      playSoundAsync, playSoundAsyncLoop, playSoundWithDucking
+// 1. AUDIO/SOUND SYSTEM (wrappers for internal/audio)
 //
-// 2. CONSOLE/UI
-//    - initConsole, logProgress, setConsoleTitle, getConsoleWindow,
-//      waitForUser, confirmAction
+// 2. CONSOLE/UI (wrappers for internal/console)
+//    - initConsole, waitForUser, confirmAction
 //
-// 3. GITHUB API
+// 3. GITHUB API (wrappers for internal/github)
 //    - getLatestCommit, compareCommits, getLastCommitDate, validateChannelSwitch,
 //      getCommitsSinceLastUpdate, formatCommitAsCliffNote, generateCliffNotes,
 //      getLatestTag, getZipURLForChannel, getGitHubTree, getRawURLForTag
@@ -66,27 +75,25 @@ import (
 // 6. INSTALLATION
 //    - handleInstallation, copyUpdaterToInstallation
 //
-// 7. PROCESS DETECTION
-//    - isProxianiRunning, isMUDMixerRunning, isMUSHClientRunningInDir,
-//      isMUSHClientRunning
+// 7. PROCESS DETECTION (uses internal/process)
+//    - isProxianiRunning, isMUDMixerRunning, isMUSHClientRunning
 //
-// 8. WORLD FILE UPDATES
+// 8. WORLD FILE UPDATES (uses internal/install)
 //    - updateWorldFile, updateWorldFileForProxiani, updateWorldFileForMUDMixer
 //
-// 9. VERSION MANAGEMENT
-//    - parseVersionFromTag, getLatestVersion, getLocalVersion
+// 9. VERSION MANAGEMENT (uses internal/version)
+//    - getLatestVersion, getLocalVersion
 //
-// 10. CHANNEL MANAGEMENT
+// 10. CHANNEL MANAGEMENT (uses internal/channel)
 //     - saveChannel, loadChannel, isValidChannel, promptForChannel,
 //       promptForBranch
 //
-// 11. INSTALLATION DETECTION
+// 11. INSTALLATION DETECTION (uses internal/install)
 //     - isInstalled, hasWorldFilesInCurrentDir, detectToastushInstallation,
 //       getDesktopPath, checkDesktopShortcut, getShortcutTarget
 //
-// 12. FILE OPERATIONS
-//     - normalizePath, denormalizePath, isUserConfigFile, loadExcludes,
-//       matchesExclusionPattern, moveToOldFolder, cleanOldFolder, hashFile
+// 12. FILE OPERATIONS (uses internal/paths)
+//     - loadExcludes, moveToOldFolder, cleanOldFolder, hashFile
 //
 // 13. PROMPTING/MENUS
 //     - promptForInstallFolder, promptInstallationMenu
@@ -98,9 +105,8 @@ import (
 //     - handleToastushMigration
 //
 // 16. MISCELLANEOUS
-//     - needsToUpdateMUSHClientExe, launchMUSHClient,
-//       createChannelSwitchBatchFiles, fatalError, createUpdaterExcludes,
-//       findActualPath, writeUpdateSuccess
+//     - needsToUpdateMUSHClientExe, launchMUSHClient, fatalError,
+//       createUpdaterExcludes, writeUpdateSuccess
 //
 // 17. MAIN
 //     - main (primary entry point)
@@ -161,6 +167,40 @@ func playSoundWithDucking(soundData []byte, foregroundVolumeDB float64) {
 	audio.PlayWithDucking(soundData, foregroundVolumeDB)
 }
 
+// soundAdapter implements prompt.SoundPlayer
+type soundAdapter struct{}
+
+func (s soundAdapter) Play(name string) {
+	switch name {
+	case "select":
+		playSound(selectSound)
+	case "success":
+		playSound(successSound)
+	case "error":
+		playSound(errorSound)
+	}
+}
+
+func (s soundAdapter) PlayAsync(name string) {
+	switch name {
+	case "select":
+		playSoundAsync(selectSound, 0.0)
+	case "success":
+		playSoundAsync(successSound, 0.0)
+	case "error":
+		playSoundAsync(errorSound, 0.0)
+	}
+}
+
+// promptConfig returns the prompt configuration for the current state
+func promptConfig() prompt.Config {
+	return prompt.Config{
+		NonInteractive:   nonInteractive,
+		Sound:            soundAdapter{},
+		GetConsoleWindow: console.GetWindow,
+	}
+}
+
 // ============================================================================
 // SECTION 2: CONSOLE/UI (delegated to internal/console)
 // ============================================================================
@@ -169,8 +209,8 @@ func initConsole() bool {
 	return console.Attach()
 }
 
-// Version info - set via linker flags: -ldflags "-X main.version=1.3.2"
-var version = "dev"
+// appVersion is set via linker flags: -ldflags "-X main.appVersion=1.3.2"
+var appVersion = "dev"
 
 const (
 	githubOwner  = "distantorigin"
@@ -232,16 +272,11 @@ var (
 // ErrUserCancelled is returned when the user cancels an operation
 var ErrUserCancelled = fmt.Errorf("operation cancelled by user")
 
-type Version struct {
-	Major  int    `json:"major"`
-	Minor  int    `json:"minor"`
-	Patch  int    `json:"patch"`
-	Commit string `json:"commit,omitempty"`
-	Date   string `json:"date,omitempty"`
-}
+// Version is an alias for version.Version for backwards compatibility
+type Version = version.Version
 
-// Returns the version in semantic format as a string
-func (v Version) String() string {
+// versionString returns the version in semantic format as a string
+func versionString(v Version) string {
 	ver := fmt.Sprintf("%d.%d.%02d", v.Major, v.Minor, v.Patch)
 	if v.Commit != "" {
 		ver += fmt.Sprintf("+%s", v.Commit[:7])
@@ -464,51 +499,12 @@ func getCommitsSinceLastUpdate() ([]github.Commit, error) {
 	return comparison.Commits, nil
 }
 
-// formatCommitAsCliffNote formats a commit message as a cliff note
-// Extracts the first line and removes common prefixes/patterns
 func formatCommitAsCliffNote(commit github.Commit) string {
-	// Get first line of commit message
-	message := commit.Commit.Message
-	lines := strings.Split(message, "\n")
-	firstLine := strings.TrimSpace(lines[0])
-
-	// Skip merge commits
-	if strings.HasPrefix(strings.ToLower(firstLine), "merge ") {
-		return ""
-	}
-
-	// Truncate SHA to 7 characters
-	shortSHA := commit.SHA
-	if len(shortSHA) > 7 {
-		shortSHA = shortSHA[:7]
-	}
-
-	// Capitalize first letter if not already
-	if len(firstLine) > 0 {
-		firstRune := []rune(firstLine)
-		firstRune[0] = []rune(strings.ToUpper(string(firstRune[0])))[0]
-		firstLine = string(firstRune)
-	}
-
-	return fmt.Sprintf("* %s (Commit %s)", firstLine, shortSHA)
+	return changelog.FormatCommitAsCliffNote(commit)
 }
 
 func generateCliffNotes(commits []github.Commit) string {
-	if len(commits) == 0 {
-		return ""
-	}
-
-	var notes strings.Builder
-	notes.WriteString("\nChanges in this update:\n\n")
-
-	for _, commit := range commits {
-		note := formatCommitAsCliffNote(commit)
-		if note != "" {
-			notes.WriteString(note + "\n")
-		}
-	}
-
-	return notes.String()
+	return changelog.GenerateCliffNotes(commits)
 }
 
 func getLatestTag() (string, error) {
@@ -540,22 +536,6 @@ func getRawURLForTag(tag string, path string) string {
 // ============================================================================
 // SECTION 12: FILE OPERATIONS
 // ============================================================================
-
-func normalizePath(p string) string {
-	return paths.Normalize(p)
-}
-
-func denormalizePath(p string) string {
-	return paths.Denormalize(p)
-}
-
-func isUserConfigFile(path string) bool {
-	return paths.IsUserConfig(path)
-}
-
-func logProgress(format string, args ...interface{}) {
-	console.Log(format, args...)
-}
 
 type UpdateResult struct {
 	Result       string   `json:"result"`                  // "success" or "failure"
@@ -601,18 +581,6 @@ func writeUpdateSuccess(updates []manifest.FileInfo, deletedFiles []string, wasR
 	return os.WriteFile(resultPath, append(jsonData, '\n'), 0644)
 }
 
-func findActualPath(targetPath string) (string, error) {
-	return paths.FindActual(targetPath)
-}
-
-func setConsoleTitle(title string) error {
-	return console.SetTitle(title)
-}
-
-func getConsoleWindow() uintptr {
-	return console.GetWindow()
-}
-
 // ============================================================================
 // SECTION 17: MAIN
 // ============================================================================
@@ -633,6 +601,9 @@ func main() {
 
 	// Configure log package to not include file paths
 	log.SetFlags(0)
+
+	// Clean up old updater binary if we just self-updated
+	selfupdate.CleanupOld()
 
 	// Normalize double-dash flags to single-dash (Go's flag package uses single dash)
 	// This allows users to use --channel instead of -channel
@@ -677,7 +648,7 @@ func main() {
 	// Attach to or create console for output
 	initConsole()
 
-	setConsoleTitle(title)
+	console.SetTitle(title)
 	// Clean up old updater binary if this is a post-update restart
 	if os.Getenv("UPDATER_CLEANUP_OLD") == "1" {
 		if exePath, err := os.Executable(); err == nil {
@@ -823,14 +794,14 @@ func main() {
 
 	// If version flag is set, print version and exit
 	if versionFlag {
-		fmt.Printf("Miriani-Next Updater v%s\n", version)
+		fmt.Printf("Miriani-Next Updater v%s\n", appVersion)
 		return
 	}
 
 	// If self-update check flag is set, wait briefly then check for updates
 	if selfUpdateCheckFlag {
 		time.Sleep(500 * time.Millisecond) // Wait for parent process to exit
-		selfUpdate()                       // Check and update if needed (silent)
+		_ = selfupdate.Check(selfupdate.DefaultConfig(appVersion))
 		return
 	}
 
@@ -1022,7 +993,7 @@ func main() {
 					}
 				} else {
 					// Non-interactive mode but no installation found
-					logProgress("No existing installation found and cannot prompt for location in non-interactive mode")
+					console.Log("No existing installation found and cannot prompt for location in non-interactive mode")
 					return
 				}
 			} else {
@@ -1112,7 +1083,7 @@ func main() {
 			}
 
 			// Create channel switching batch files
-			if err := createChannelSwitchBatchFiles(installDir); err != nil {
+			if err := install.CreateChannelSwitchBatchFiles(installDir); err != nil {
 				fmt.Printf("Warning: failed to create channel switch batch files: %v\n", err)
 			} else if !quietFlag {
 				fmt.Println("Created channel switching batch files")
@@ -1266,17 +1237,17 @@ func main() {
 		if nonInteractive {
 			// In non-interactive mode with allow-restart, kill MUSHclient before updating
 			if allowRestartFlag {
-				logProgress("MUSHclient is running. Killing MUSHclient to proceed with update...")
+				console.Log("MUSHclient is running. Killing MUSHclient to proceed with update...")
 				if err := exec.Command("taskkill", "/IM", "MUSHclient.exe", "/F").Run(); err != nil {
-					logProgress("Error: failed to kill MUSHclient: %v", err)
+					console.Log("Error: failed to kill MUSHclient: %v", err)
 					return
 				}
 				mushWasRunning = true
-				logProgress("MUSHclient killed successfully. Proceeding with update...")
+				console.Log("MUSHclient killed successfully. Proceeding with update...")
 				playSoundAsync(successSound, 0.0)
 				// Wait for process to fully terminate
-				if !waitForProcessToTerminate("MUSHclient.exe", 5*time.Second) {
-					logProgress("Warning: MUSHclient may not have fully terminated")
+				if !process.WaitForTermination("MUSHclient.exe", 5*time.Second) {
+					console.Log("Warning: MUSHclient may not have fully terminated")
 				}
 			} else {
 				// This shouldn't happen since we checked above, but handle it anyway
@@ -1310,7 +1281,7 @@ func main() {
 		fatalError("Error getting working directory: %v", err)
 	}
 	for _, path := range deletedFiles {
-		filePath := filepath.Join(baseDir, denormalizePath(path))
+		filePath := filepath.Join(baseDir, paths.Denormalize(path))
 		if err := moveToOldFolder(filePath, path); err == nil {
 			if !quietFlag && verboseFlag && !nonInteractive {
 				fmt.Printf("Removed: %s (moved to .old/)\n", path)
@@ -1333,14 +1304,14 @@ func main() {
 
 	// After update, restart MUSHclient if we killed it
 	if mushWasRunning {
-		logProgress("Restarting MUSHclient...")
+		console.Log("Restarting MUSHclient...")
 		if err := launchMUSHClient(); err != nil {
-			logProgress("Warning: failed to restart MUSHclient: %v", err)
+			console.Log("Warning: failed to restart MUSHclient: %v", err)
 			if !quietFlag && !nonInteractive {
 				fmt.Printf("Warning: failed to restart MUSHclient: %v\n", err)
 			}
 		} else {
-			logProgress("MUSHclient restarted successfully.")
+			console.Log("MUSHclient restarted successfully.")
 			if !quietFlag && !nonInteractive {
 				fmt.Println("MUSHclient restarted.")
 			}
@@ -1355,7 +1326,7 @@ func main() {
 	// Write .update-result file in non-interactive mode
 	if nonInteractive {
 		if err := writeUpdateSuccess(updates, deletedFiles, mushWasRunning); err != nil {
-			logProgress("Warning: failed to write .update-result: %v", err)
+			console.Log("Warning: failed to write .update-result: %v", err)
 		}
 	}
 
@@ -1369,152 +1340,6 @@ func main() {
 		}
 		cmd.Start() // Fire and forget - don't wait
 	}
-}
-
-// selfUpdate checks for a new version of the updater itself and replaces it if a new version is available.
-// This function fails silently with a short timeout to avoid blocking the main update process.
-func selfUpdate() error {
-	const versionURL = "https://anomalousabode.com/next/updater-version"
-	const updaterBinaryURL = "https://anomalousabode.com/next/updater"
-	const updaterHashURL = "https://anomalousabode.com/next/updater.sha256"
-
-	// Get the path of the current executable
-	exePath, err := os.Executable()
-	if err != nil {
-		// Silent failure - not critical
-		return nil
-	}
-
-	// Create a client with a very short timeout for self-update check
-	quickClient := &http.Client{
-		Timeout: 2 * time.Second,
-		Transport: &http.Transport{
-			MaxIdleConns:        10,
-			MaxIdleConnsPerHost: 2,
-			IdleConnTimeout:     10 * time.Second,
-			DisableCompression:  false,
-		},
-	}
-
-	// Make a request to the update URL
-	resp, err := quickClient.Get(versionURL)
-	if err != nil {
-		// Silent failure - network issues, server down, etc.
-		return nil
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		// Silent failure - updater not available or other HTTP error
-		return nil
-	}
-
-	// Read the remote version
-	versionData, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil
-	}
-
-	remoteVersion := strings.TrimSpace(string(versionData))
-	if remoteVersion == "" || remoteVersion == version {
-		return nil
-	}
-
-	// Update available - download the expected hash first
-	downloadClient := &http.Client{Timeout: 30 * time.Second}
-
-	hashResp, err := downloadClient.Get(updaterHashURL)
-	if err != nil {
-		// Silent failure - can't verify without hash
-		return nil
-	}
-	defer hashResp.Body.Close()
-
-	if hashResp.StatusCode != http.StatusOK {
-		// Silent failure - hash not available, refuse to update without verification
-		return nil
-	}
-
-	hashData, err := io.ReadAll(hashResp.Body)
-	if err != nil {
-		return nil
-	}
-
-	// Parse expected hash (format: "sha256hash  filename" or just "sha256hash")
-	expectedHash := strings.TrimSpace(string(hashData))
-	if idx := strings.Index(expectedHash, " "); idx > 0 {
-		expectedHash = expectedHash[:idx]
-	}
-	expectedHash = strings.ToLower(expectedHash)
-
-	if len(expectedHash) != 64 {
-		// Invalid hash format, refuse to update
-		return nil
-	}
-
-	// Download new binary
-	binaryResp, err := downloadClient.Get(updaterBinaryURL)
-	if err != nil {
-		// Silent failure
-		return nil
-	}
-	defer binaryResp.Body.Close()
-
-	if binaryResp.StatusCode != http.StatusOK {
-		return nil
-	}
-
-	data, err := io.ReadAll(binaryResp.Body)
-	if err != nil {
-		return nil
-	}
-
-	// Verify SHA256 hash before replacing
-	actualHash := sha256.Sum256(data)
-	actualHashStr := hex.EncodeToString(actualHash[:])
-
-	if actualHashStr != expectedHash {
-		// Hash mismatch - binary may be corrupted or tampered with, refuse to update
-		return nil
-	}
-
-	// Hash verified - safe to replace
-	oldExe := exePath + ".old"
-	os.Remove(oldExe)
-	if err := os.Rename(exePath, oldExe); err != nil {
-		return nil
-	}
-
-	if err := os.WriteFile(exePath, data, 0755); err != nil {
-		os.Rename(oldExe, exePath)
-		return nil
-	}
-
-	// Restart with same arguments (silently)
-	cmd := exec.Command(exePath, os.Args[1:]...)
-
-	// On Windows, we need to properly detach the child process
-	// Inherit stdin/stdout/stderr so the new process shows in the same console
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	// Set environment variable to signal cleanup of .old file
-	cmd.Env = append(os.Environ(), "UPDATER_CLEANUP_OLD=1")
-
-	// Start the new process
-	if err := cmd.Start(); err != nil {
-		// Restore old executable if restart failed
-		os.Remove(exePath)
-		os.Rename(oldExe, exePath)
-		return err
-	}
-
-	// Give the new process a moment to initialize before we exit
-	time.Sleep(100 * time.Millisecond)
-	os.Exit(0)
-
-	return nil
 }
 
 // ============================================================================
@@ -1554,43 +1379,40 @@ func getPendingUpdates() ([]manifest.FileInfo, []string, error) {
 	}
 	excludes := loadExcludes()
 
-	// Normalize local manifest keys for case-insensitive comparison
-	normalizedLocal := make(map[string]manifest.FileInfo)
+	// Normalize both manifests once for efficient comparison
+	normalizedLocal := make(map[string]manifest.FileInfo, len(localManifest))
 	for path, info := range localManifest {
-		normalized := normalizePath(path)
-		normalizedLocal[normalized] = info
+		normalizedLocal[paths.Normalize(path)] = info
 	}
 
-	var updates []manifest.FileInfo
-	for path, remote := range remoteManifest {
-		normalized := normalizePath(path)
-		// Check if file matches any exclusion pattern
-		if matchesExclusionPattern(normalized, excludes) {
+	normalizedRemote := make(map[string]manifest.FileInfo, len(remoteManifest))
+	for path, info := range remoteManifest {
+		normalized := paths.Normalize(path)
+		// Skip excluded files during normalization
+		if paths.MatchesExclusion(normalized, excludes) {
 			if !quietFlag && verboseFlag {
 				fmt.Printf("Skipping excluded file: %s\n", normalized)
 			}
 			continue
 		}
+		normalizedRemote[normalized] = info
+	}
 
-		// Check if file is in local manifest
-		local, existsLocally := normalizedLocal[normalized]
-
-		// Need update if: file doesn't exist in local manifest, or hash mismatch
-		if !existsLocally {
-			updates = append(updates, remote)
-		} else if local.Hash != remote.Hash {
+	// Find updates: files in remote that are new or changed
+	var updates []manifest.FileInfo
+	for path, remote := range normalizedRemote {
+		if local, exists := normalizedLocal[path]; !exists || local.Hash != remote.Hash {
 			updates = append(updates, remote)
 		}
 	}
 
-	// Clean up files that were in local manifest but removed from remote
+	// Find deletions: files in local but not in remote
 	var deletedFiles []string
 	if !quietFlag && verboseFlag {
 		fmt.Println("Checking for removed files...")
 	}
 	for path := range normalizedLocal {
-		// If file is in local manifest but not in remote manifest, mark it for deletion
-		if _, existsInRemote := remoteManifest[path]; !existsInRemote {
+		if _, exists := normalizedRemote[path]; !exists {
 			deletedFiles = append(deletedFiles, path)
 		}
 	}
@@ -1711,7 +1533,7 @@ func performUpdates(updates []manifest.FileInfo) error {
 
 				percentage := (current * 100) / total
 				// Update title bar with progress
-				setConsoleTitle(fmt.Sprintf("%s - Downloading: %d%%", title, percentage))
+				console.SetTitle(fmt.Sprintf("%s - Downloading: %d%%", title, percentage))
 
 				if nonInteractive {
 					// In non-interactive mode, only print percentage
@@ -1741,7 +1563,7 @@ func performUpdates(updates []manifest.FileInfo) error {
 		fmt.Println("Saving manifest...")
 	}
 	// Reset title
-	setConsoleTitle(title)
+	console.SetTitle(title)
 	return saveManifest()
 }
 
@@ -1750,7 +1572,7 @@ var grabClient = grab.NewClient()
 
 func downloadFile(info manifest.FileInfo) error {
 	// Never overwrite user configuration files
-	if isUserConfigFile(info.Name) {
+	if paths.IsUserConfig(info.Name) {
 		if verboseFlag {
 			log.Printf("Skipping user config file: %s\n", info.Name)
 		}
@@ -1763,7 +1585,7 @@ func downloadFile(info manifest.FileInfo) error {
 	}
 
 	// Normalize the file path from manifest (forward slashes) to platform format
-	relativePath := denormalizePath(info.Name)
+	relativePath := paths.Denormalize(info.Name)
 	targetPath := filepath.Join(baseDir, relativePath)
 
 	// Ensure target path doesn't escape the base directory
@@ -1780,7 +1602,7 @@ func downloadFile(info manifest.FileInfo) error {
 	}
 
 	// Find actual path in case of case mismatch
-	targetPath, err = findActualPath(absTargetPath)
+	targetPath, err = paths.FindActual(absTargetPath)
 	if err != nil {
 		return fmt.Errorf("failed to find path for %s: %w", info.Name, err)
 	}
@@ -1850,7 +1672,7 @@ progressLoop:
 			if resp.Size() > 0 {
 				percentage := int(resp.Progress() * 100)
 				if percentage != lastPercentage {
-					setConsoleTitle(fmt.Sprintf("%s - Downloading: %d%%", title, percentage))
+					console.SetTitle(fmt.Sprintf("%s - Downloading: %d%%", title, percentage))
 					if nonInteractive {
 						fmt.Printf("%d%%\n", percentage)
 					} else if !quietFlag && !verboseFlag {
@@ -1934,7 +1756,7 @@ progressLoop:
 	if len(filesToExtract) > 0 {
 		extractFilter = make(map[string]bool, len(filesToExtract))
 		for _, f := range filesToExtract {
-			normalizedPath := normalizePath(f.Name)
+			normalizedPath := paths.Normalize(f.Name)
 			extractFilter[normalizedPath] = true
 		}
 	}
@@ -1958,7 +1780,7 @@ progressLoop:
 
 		// If we have a file filter (for updates), skip files not in the filter
 		if extractFilter != nil {
-			normalizedRelPath := normalizePath(relPath)
+			normalizedRelPath := paths.Normalize(relPath)
 			if !extractFilter[normalizedRelPath] {
 				skippedFiles++
 				if verboseFlag && !nonInteractive {
@@ -1969,9 +1791,9 @@ progressLoop:
 		}
 
 		// Skip user configuration files during updates (but not during fresh install)
-		if !isInstall && isUserConfigFile(relPath) {
+		if !isInstall && paths.IsUserConfig(relPath) {
 			// Check if file already exists - only skip if it exists
-			filePath := filepath.Join(absTargetDir, denormalizePath(relPath))
+			filePath := filepath.Join(absTargetDir, paths.Denormalize(relPath))
 			if _, err := os.Stat(filePath); err == nil {
 				if !quietFlag && verboseFlag && !nonInteractive {
 					fmt.Printf("Preserving existing user config file: %s\n", relPath)
@@ -1982,7 +1804,7 @@ progressLoop:
 		}
 
 		// Archive paths use forward slashes, normalize to platform format
-		normalizedPath := denormalizePath(relPath)
+		normalizedPath := paths.Denormalize(relPath)
 		fpath := filepath.Join(absTargetDir, normalizedPath)
 
 		// Security: Ensure path doesn't escape base directory
@@ -2026,7 +1848,7 @@ progressLoop:
 		extractedFiles++
 		percentage := (extractedFiles * 100) / totalFiles
 		// Update title bar with progress
-		setConsoleTitle(fmt.Sprintf("%s - Extracting: %d%%", title, percentage))
+		console.SetTitle(fmt.Sprintf("%s - Extracting: %d%%", title, percentage))
 
 		if nonInteractive {
 			// Only print at meaningful intervals to avoid spam
@@ -2066,7 +1888,7 @@ progressLoop:
 	}
 
 	// Reset title
-	setConsoleTitle(title)
+	console.SetTitle(title)
 	return nil
 }
 
@@ -2137,12 +1959,12 @@ func loadRemoteManifest() (map[string]manifest.FileInfo, error) {
 		}
 
 		// Skip excluded files
-		if manifestManager.ShouldExclude(item.Path, normalizePath) {
+		if manifestManager.ShouldExclude(item.Path, paths.Normalize) {
 			continue
 		}
 
 		// Normalize path
-		normalizedPath := normalizePath(item.Path)
+		normalizedPath := paths.Normalize(item.Path)
 
 		// Generate raw URL
 		rawURL := getRawURLForTag(ref, item.Path)
@@ -2177,7 +1999,7 @@ func saveManifest() error {
 	// This ensures the local manifest accurately represents what's actually installed
 	localManifest := make(map[string]manifest.FileInfo)
 	for path, info := range remoteManifest {
-		filePath := filepath.Join(baseDir, denormalizePath(path))
+		filePath := filepath.Join(baseDir, paths.Denormalize(path))
 		if _, err := os.Stat(filePath); err == nil {
 			// File exists locally, include it in the local manifest
 			localManifest[path] = info
@@ -2236,18 +2058,18 @@ func handleInstallation() (string, error) {
 	fmt.Printf("\nThis will install the %s version to: %s\n", channelFlag, installDir)
 
 	// Check if MUSHclient is running before installation
-	if isMUSHClientRunningInDir(installDir) {
+	if process.IsMUSHClientRunningInDir(installDir) {
 		if nonInteractive {
 			// In non-interactive mode, kill MUSHclient before installing
-			logProgress("MUSHclient is running. Killing MUSHclient before installation...")
+			console.Log("MUSHclient is running. Killing MUSHclient before installation...")
 			if err := exec.Command("taskkill", "/IM", "MUSHclient.exe", "/F").Run(); err != nil {
-				logProgress("Error: failed to kill MUSHclient: %v", err)
+				console.Log("Error: failed to kill MUSHclient: %v", err)
 				return "", fmt.Errorf("failed to kill MUSHclient: %w", err)
 			}
-			logProgress("MUSHclient killed successfully. Proceeding with installation...")
+			console.Log("MUSHclient killed successfully. Proceeding with installation...")
 			// Wait for process to fully terminate
-			if !waitForProcessToTerminate("MUSHclient.exe", 5*time.Second) {
-				logProgress("Warning: MUSHclient may not have fully terminated")
+			if !process.WaitForTermination("MUSHclient.exe", 5*time.Second) {
+				console.Log("Warning: MUSHclient may not have fully terminated")
 			}
 		} else {
 			// In interactive mode, tell user to close it
@@ -2341,7 +2163,7 @@ func handleInstallation() (string, error) {
 	}
 
 	// Create channel switching batch files
-	if err := createChannelSwitchBatchFiles(installDir); err != nil {
+	if err := install.CreateChannelSwitchBatchFiles(installDir); err != nil {
 		// Non-fatal - just warn
 		fmt.Printf("Warning: failed to create channel switch batch files: %v\n", err)
 	} else if !quietFlag && verboseFlag {
@@ -2405,20 +2227,20 @@ func handleInstallation() (string, error) {
 	} else if (proxianiDetected || mudmixerDetected) && nonInteractive {
 		// In non-interactive mode, auto-configure (prioritize MUDMixer)
 		if mudmixerDetected {
-			logProgress("MUDMixer detected! Auto-configuring world file...")
+			console.Log("MUDMixer detected! Auto-configuring world file...")
 			worldFilePath := filepath.Join(installDir, worldsDir, worldFileName)
 			if err := updateWorldFileForMUDMixer(worldFilePath); err != nil {
-				logProgress("Warning: failed to update world file for MUDMixer: %v", err)
+				console.Log("Warning: failed to update world file for MUDMixer: %v", err)
 			} else {
-				logProgress("World file updated successfully for MUDMixer")
+				console.Log("World file updated successfully for MUDMixer")
 			}
 		} else if proxianiDetected {
-			logProgress("Proxiani detected! Auto-configuring world file...")
+			console.Log("Proxiani detected! Auto-configuring world file...")
 			worldFilePath := filepath.Join(installDir, worldsDir, worldFileName)
 			if err := updateWorldFileForProxiani(worldFilePath); err != nil {
-				logProgress("Warning: failed to update world file for Proxiani: %v", err)
+				console.Log("Warning: failed to update world file for Proxiani: %v", err)
 			} else {
-				logProgress("World file updated successfully for Proxiani")
+				console.Log("World file updated successfully for Proxiani")
 			}
 		}
 	}
@@ -2561,20 +2383,12 @@ func needsToUpdateMUSHClientExe(updates []manifest.FileInfo) bool {
 	return false
 }
 
-func isMUSHClientRunningInDir(targetDir string) bool {
-	return process.IsMUSHClientRunningInDir(targetDir)
-}
-
 func isMUSHClientRunning() bool {
 	baseDir, err := os.Getwd()
 	if err != nil {
 		return false
 	}
 	return process.IsMUSHClientRunningInDir(baseDir)
-}
-
-func waitForProcessToTerminate(processName string, timeout time.Duration) bool {
-	return process.WaitForTermination(processName, timeout)
 }
 
 func launchMUSHClient() error {
@@ -2584,7 +2398,7 @@ func launchMUSHClient() error {
 	}
 
 	// Check if MUSHclient is already running to prevent duplicate instances
-	if isMUSHClientRunningInDir(baseDir) {
+	if process.IsMUSHClientRunningInDir(baseDir) {
 		return fmt.Errorf("MUSHclient is already running")
 	}
 
@@ -2606,14 +2420,6 @@ func loadExcludes() map[string]struct{} {
 		return make(map[string]struct{})
 	}
 	return paths.LoadExcludes(filepath.Join(baseDir, excludesFile))
-}
-
-func matchesExclusionPattern(path string, excludes map[string]struct{}) bool {
-	return paths.MatchesExclusion(path, excludes)
-}
-
-func createChannelSwitchBatchFiles(installDir string) error {
-	return install.CreateChannelSwitchBatchFiles(installDir)
 }
 
 // ------------------------
@@ -2654,7 +2460,7 @@ func moveToOldFolder(filePath string, relativePath string) error {
 	}
 
 	// Create subdirectories in .old if needed
-	oldFilePath := filepath.Join(oldDir, denormalizePath(relativePath))
+	oldFilePath := filepath.Join(oldDir, paths.Denormalize(relativePath))
 	if err := os.MkdirAll(filepath.Dir(oldFilePath), 0755); err != nil {
 		return err
 	}
@@ -2714,66 +2520,10 @@ func createUpdaterExcludes() error {
 // ============================================================================
 
 func buildChangelog(updates []manifest.FileInfo, deletedFiles []string) string {
-	var changelog strings.Builder
-	totalChanges := len(updates) + len(deletedFiles)
-
-	changelog.WriteString("Miriani-Next Update Changelog\n\n")
-	changelog.WriteString(fmt.Sprintf("Channel: %s\n", channelFlag))
-	changelog.WriteString(fmt.Sprintf("Update completed: %s\n", time.Now().Format("2006-01-02 15:04:05")))
-	changelog.WriteString(fmt.Sprintf("Total changes: %d files (%d updated, %d deleted)\n", totalChanges, len(updates), len(deletedFiles)))
-
-	// Add cliff notes for dev/experimental or changelog.txt for stable
-	if channelFlag == "stable" {
-		// For stable, try to include docs/changelog.txt
-		changelogPath := filepath.Join("docs", "changelog.txt")
-		if content, err := os.ReadFile(changelogPath); err == nil {
-			changelog.WriteString("\n")
-			changelog.WriteString(strings.Repeat("=", 60))
-			changelog.WriteString("\n")
-			changelog.WriteString("RELEASE NOTES\n")
-			changelog.WriteString(strings.Repeat("=", 60))
-			changelog.WriteString("\n\n")
-			changelog.WriteString(string(content))
-			changelog.WriteString("\n")
-			changelog.WriteString(strings.Repeat("=", 60))
-			changelog.WriteString("\n\n")
-		}
-	} else {
-		// For dev/experimental, generate cliff notes from commits
-		if commits, err := getCommitsSinceLastUpdate(); err == nil && len(commits) > 0 {
-			cliffNotes := generateCliffNotes(commits)
-			if cliffNotes != "" {
-				changelog.WriteString("\n")
-				changelog.WriteString(cliffNotes)
-				changelog.WriteString("\n")
-			}
-		}
-	}
-
-	// Add file list at the end
-	changelog.WriteString("\n")
-	changelog.WriteString(strings.Repeat("-", 60))
-	changelog.WriteString("\nDetailed file changes:\n")
-	changelog.WriteString(strings.Repeat("-", 60))
-	changelog.WriteString("\n\n")
-
-	if len(updates) > 0 {
-		changelog.WriteString(fmt.Sprintf("Updated/Added (%d files):\n", len(updates)))
-		for _, update := range updates {
-			changelog.WriteString(fmt.Sprintf("  + %s\n", update.Name))
-		}
-		changelog.WriteString("\n")
-	}
-
-	if len(deletedFiles) > 0 {
-		changelog.WriteString(fmt.Sprintf("Deleted (%d files):\n", len(deletedFiles)))
-		for _, deleted := range deletedFiles {
-			changelog.WriteString(fmt.Sprintf("  - %s\n", deleted))
-		}
-		changelog.WriteString("\n")
-	}
-
-	return changelog.String()
+	return changelog.Build(updates, deletedFiles, changelog.BuildConfig{
+		Channel:               channelFlag,
+		GetCommitsSinceUpdate: getCommitsSinceLastUpdate,
+	})
 }
 
 // showChangelog displays updated and deleted files and offers to open in notepad
@@ -2795,107 +2545,20 @@ func showChangelog(updates []manifest.FileInfo, deletedFiles []string) {
 	}
 }
 
-func waitForUser(prompt string) {
-	console.WaitForKey(prompt, nonInteractive)
+func waitForUser(p string) {
+	prompt.WaitForKey(p, promptConfig())
 }
 
 // ============================================================================
-// SECTION 13: PROMPTING/MENUS
+// SECTION 13: PROMPTING/MENUS (delegated to internal/prompt)
 // ============================================================================
 
 func promptForInstallFolder(defaultPath string) (string, error) {
-	if nonInteractive {
-		return defaultPath, nil
-	}
-
-	// Prompt user to press Enter before opening dialog
-	fmt.Println("\nPress Enter to select installation folder...")
-	bufio.NewReader(os.Stdin).ReadBytes('\n')
-
-	consoleHandle := getConsoleWindow()
-
-	ole.CoInitialize(0)
-	defer ole.CoUninitialize()
-
-	unknown, err := oleutil.CreateObject("Shell.Application")
-	if err != nil {
-		return "", fmt.Errorf("failed to create Shell object: %w", err)
-	}
-	defer unknown.Release()
-
-	shell, err := unknown.QueryInterface(ole.IID_IDispatch)
-	if err != nil {
-		return "", fmt.Errorf("failed to get IDispatch interface: %w", err)
-	}
-	defer shell.Release()
-
-	// Options: 0x10 = BIF_NEWDIALOGSTYLE (modern dialog with "Make New Folder" button)
-	folderObj, err := oleutil.CallMethod(shell, "BrowseForFolder", int(consoleHandle),
-		"Select installation folder for Miriani-Next", 0x10)
-	if err != nil {
-		return "", fmt.Errorf("failed to show folder dialog: %w", err)
-	}
-
-	if folderObj.Value() == nil {
-		return "", fmt.Errorf("folder selection cancelled")
-	}
-
-	folderItem := folderObj.ToIDispatch()
-	if folderItem == nil {
-		return "", fmt.Errorf("folder selection cancelled")
-	}
-	defer folderItem.Release()
-
-	// Get the Self property (returns FolderItem)
-	selfProp, err := oleutil.GetProperty(folderItem, "Self")
-	if err != nil {
-		return "", fmt.Errorf("failed to get folder item: %w", err)
-	}
-
-	selfDispatch := selfProp.ToIDispatch()
-	defer selfDispatch.Release()
-
-	// Get the Path property
-	pathProp, err := oleutil.GetProperty(selfDispatch, "Path")
-	if err != nil {
-		return "", fmt.Errorf("failed to get folder path: %w", err)
-	}
-
-	selectedPath := pathProp.ToString()
-	if selectedPath == "" {
-		return "", fmt.Errorf("no folder selected")
-	}
-
-	return selectedPath, nil
+	return prompt.SelectFolder(defaultPath, promptConfig())
 }
 
-// confirmAction asks the user to confirm an action
-func confirmAction(prompt string) bool {
-	// In non-interactive mode, always proceed
-	if nonInteractive {
-		return true
-	}
-
-	fmt.Printf("%s (y/n): ", prompt)
-	reader := bufio.NewReader(os.Stdin)
-	response, err := reader.ReadString('\n')
-	if err != nil {
-		return false
-	}
-	response = strings.TrimSpace(strings.ToLower(response))
-	confirmed := response == "y" || response == "yes"
-
-	// Play select sound first for any valid response
-	if confirmed || response == "n" || response == "no" {
-		playSound(selectSound)
-	}
-
-	// Play success sound when user confirms
-	if confirmed {
-		playSound(successSound)
-	}
-
-	return confirmed
+func confirmAction(p string) bool {
+	return prompt.Confirm(p, promptConfig())
 }
 
 // ============================================================================
@@ -2940,183 +2603,21 @@ func isValidChannel(channel string) bool {
 	return false
 }
 
-// promptInstallationMenu displays an interactive menu for installation options
 func promptInstallationMenu(existingInstallFound bool, detectedPath string, toastushPath string) string {
-	fmt.Println("\nMiriani-Next Installation")
-	fmt.Println()
-
-	if existingInstallFound {
-		fmt.Printf("Detected existing installation at: %s\n", detectedPath)
-		fmt.Println()
-	}
-
-	if toastushPath != "" {
-		fmt.Printf("Detected Toastush installation at: %s\n", toastushPath)
-		fmt.Println()
-	}
-
-	fmt.Println("  1. Install")
-	fmt.Println("     Full installation of Miriani-Next")
-	fmt.Println()
-	fmt.Println("  2. Install Updater")
-	fmt.Println("     Add the updater to an existing Miriani-Next installation")
-	fmt.Println()
-	fmt.Println("  3. Migrate from Toastush")
-	fmt.Println("     Upgrade existing Toastush installation to Miriani-Next")
-	fmt.Println()
-	fmt.Print("Enter your choice (1, 2, or 3): ")
-
-	reader := bufio.NewReader(os.Stdin)
-	for {
-		response, err := reader.ReadString('\n')
-		if err != nil {
-			fmt.Println("\nError reading input, cancelling installation.")
-			return ""
-		}
-
-		response = strings.TrimSpace(response)
-		switch response {
-		case "1":
-			playSoundAsync(selectSound, 0.0)
-			return "1"
-		case "2":
-			playSoundAsync(selectSound, 0.0)
-			return "2"
-		case "3":
-			playSoundAsync(selectSound, 0.0)
-			return "3"
-		default:
-			fmt.Print("Invalid choice. Please enter 1, 2, or 3: ")
-		}
-	}
+	return prompt.InstallationMenu(existingInstallFound, detectedPath, toastushPath, promptConfig())
 }
 
-// promptForChannel displays an interactive menu to select update channel
 func promptForChannel() string {
-	fmt.Println("\nMiriani-Next Update Channel Selection")
-	fmt.Println()
-	fmt.Println("Update channels control how often you receive updates:")
-	fmt.Println()
-
-	// Get last update times for stable and dev
-	stableDate := ""
-	devDate := ""
-
+	info := prompt.ChannelInfo{}
 	if tag, err := getLatestTag(); err == nil {
 		if date, err := getLastCommitDate(tag); err == nil {
-			stableDate = fmt.Sprintf(" (Last updated: %s)", date)
+			info.StableDate = date
 		}
 	}
-
 	if date, err := getLastCommitDate("main"); err == nil {
-		devDate = fmt.Sprintf(" (Last updated: %s)", date)
+		info.DevDate = date
 	}
-
-	fmt.Printf("  1. Stable%s\n", stableDate)
-	fmt.Println("     Tested, stable releases only")
-	fmt.Println("     Updates less frequently but very reliable")
-	fmt.Println("     Recommended for most users")
-	fmt.Println()
-	fmt.Printf("  2. Dev%s\n", devDate)
-	fmt.Println("     Latest features and bug fixes")
-	fmt.Println("     Updates frequently with new changes")
-	fmt.Println("     May occasionally have bugs")
-	fmt.Println()
-	fmt.Println("  3. Other")
-	fmt.Println("     Follow a specific experimental branch")
-	fmt.Println("     For advanced users and testing only")
-	fmt.Println()
-	fmt.Print("Enter your choice (1, 2, or 3): ")
-
-	reader := bufio.NewReader(os.Stdin)
-	for {
-		response, err := reader.ReadString('\n')
-		if err != nil {
-			fmt.Println("\nError reading input, defaulting to stable.")
-			return "stable"
-		}
-
-		response = strings.TrimSpace(response)
-		switch response {
-		case "1":
-			playSound(selectSound)
-			playSoundAsync(successSound, 0.0)
-			fmt.Println("\nUsing the stable channel.")
-			return "stable"
-		case "2":
-			playSound(selectSound)
-			playSoundAsync(successSound, 0.0)
-			fmt.Println("\nUsing the dev channel.")
-			return "dev"
-		case "3":
-			playSound(selectSound)
-			playSoundAsync(successSound, 0.0)
-			return promptForBranch()
-		default:
-			fmt.Print("Invalid choice. Please enter 1, 2, or 3: ")
-		}
-	}
-}
-
-func promptForBranch() string {
-	fmt.Println("\nExperimental Branch Selection")
-	fmt.Println()
-	fmt.Println("Fetching available branches...")
-
-	branches, err := ghClient.GetBranches()
-	if err != nil {
-		fmt.Printf("Error fetching branches: %v\n", err)
-		return promptForChannel()
-	}
-
-	// Filter out main (that's "dev") and show others
-	var experimentalBranches []github.Branch
-	for _, branch := range branches {
-		if branch.Name != "main" {
-			experimentalBranches = append(experimentalBranches, branch)
-		}
-	}
-
-	if len(experimentalBranches) == 0 {
-		fmt.Println("No experimental branches available.")
-		return promptForChannel()
-	}
-
-	fmt.Println("\nAvailable experimental branches:")
-	fmt.Println()
-	for i, branch := range experimentalBranches {
-		fmt.Printf("  %d. %s (commit: %s)\n", i+1, branch.Name, branch.Commit.SHA[:7])
-	}
-	fmt.Println()
-	fmt.Printf("Enter choice (1-%d) or 0 to go back: ", len(experimentalBranches))
-
-	reader := bufio.NewReader(os.Stdin)
-	for {
-		response, err := reader.ReadString('\n')
-		if err != nil {
-			fmt.Println("\nError reading input, returning to main menu.")
-			return promptForChannel()
-		}
-
-		response = strings.TrimSpace(response)
-		if response == "0" {
-			return promptForChannel()
-		}
-
-		choice := 0
-		fmt.Sscanf(response, "%d", &choice)
-		if choice >= 1 && choice <= len(experimentalBranches) {
-			selectedBranch := experimentalBranches[choice-1].Name
-			playSound(selectSound)
-			playSoundAsync(successSound, 0.0)
-			fmt.Printf("\nSelected branch: %s\n", selectedBranch)
-			fmt.Println("\nWARNING: Experimental branches may be unstable!")
-			fmt.Println("Only use this if you know what you're doing.")
-			return selectedBranch
-		} else {
-			fmt.Printf("Invalid choice. Please enter 0-%d: ", len(experimentalBranches))
-		}
-	}
+	return prompt.ChannelMenu(info, ghClient.GetBranches, promptConfig())
 }
 
 // ============================================================================
@@ -3124,30 +2625,11 @@ func promptForBranch() string {
 // ============================================================================
 
 func parseVersionFromTag(tag string) (major, minor, patch int, err error) {
-	tagVersion := strings.TrimPrefix(tag, "v")
-	parts := strings.Split(tagVersion, ".")
-	if len(parts) != 3 {
-		return 0, 0, 0, fmt.Errorf("invalid tag format: %s (expected vX.Y.Z)", tag)
-	}
-
-	major, err = strconv.Atoi(parts[0])
-	if err != nil {
-		return 0, 0, 0, fmt.Errorf("invalid major version in tag %s: %w", tag, err)
-	}
-	minor, err = strconv.Atoi(parts[1])
-	if err != nil {
-		return 0, 0, 0, fmt.Errorf("invalid minor version in tag %s: %w", tag, err)
-	}
-	patch, err = strconv.Atoi(parts[2])
-	if err != nil {
-		return 0, 0, 0, fmt.Errorf("invalid patch version in tag %s: %w", tag, err)
-	}
-
-	return major, minor, patch, nil
+	return version.ParseTag(tag)
 }
 
 func getLatestVersion() (*Version, error) {
-	var version Version
+	var ver Version
 
 	if channelFlag == "stable" {
 		// For stable, get latest tag and parse version from it
@@ -3161,31 +2643,31 @@ func getLatestVersion() (*Version, error) {
 			return nil, err
 		}
 
-		version.Major = major
-		version.Minor = minor
-		version.Patch = patch
-		version.Commit = "" // Stable releases don't have commit SHA in version
+		ver.Major = major
+		ver.Minor = minor
+		ver.Patch = patch
+		ver.Commit = "" // Stable releases don't have commit SHA in version
 	} else {
 		// For dev/experimental, get version from latest tag but include commit SHA
 		// First, try to get the latest tag to extract version numbers
 		tag, err := getLatestTag()
 		if err != nil {
 			// If we can't get the tag, fall back to 0.0.0
-			version.Major = 0
-			version.Minor = 0
-			version.Patch = 0
+			ver.Major = 0
+			ver.Minor = 0
+			ver.Patch = 0
 		} else {
 			// Try to parse version from tag, fall back to 0.0.0 on error
 			major, minor, patch, err := parseVersionFromTag(tag)
 			if err == nil {
-				version.Major = major
-				version.Minor = minor
-				version.Patch = patch
+				ver.Major = major
+				ver.Minor = minor
+				ver.Patch = patch
 			} else {
 				// Fall back to 0.0.0 if parsing fails
-				version.Major = 0
-				version.Minor = 0
-				version.Patch = 0
+				ver.Major = 0
+				ver.Minor = 0
+				ver.Patch = 0
 			}
 		}
 
@@ -3202,17 +2684,17 @@ func getLatestVersion() (*Version, error) {
 
 		// Store first 16 characters of commit SHA
 		if len(tree.SHA) >= 16 {
-			version.Commit = tree.SHA[:16]
+			ver.Commit = tree.SHA[:16]
 		} else {
-			version.Commit = tree.SHA
+			ver.Commit = tree.SHA
 		}
 
 		if !quietFlag && verboseFlag {
-			fmt.Printf("Dev channel version: %d.%d.%d+%s\n", version.Major, version.Minor, version.Patch, version.Commit)
+			fmt.Printf("Dev channel version: %d.%d.%d+%s\n", ver.Major, ver.Minor, ver.Patch, ver.Commit)
 		}
 	}
 
-	return &version, nil
+	return &ver, nil
 }
 
 func getLocalVersion() (*Version, error) {
@@ -3220,19 +2702,7 @@ func getLocalVersion() (*Version, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get working directory: %w", err)
 	}
-
-	path := filepath.Join(baseDir, versionFile)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read local version: %w", err)
-	}
-
-	var version Version
-	if err := json.Unmarshal(data, &version); err != nil {
-		return nil, fmt.Errorf("failed to parse local version: %w", err)
-	}
-
-	return &version, nil
+	return version.LoadLocal(baseDir, versionFile)
 }
 
 // detectToastushInstallation attempts to find an existing Toastush installation
@@ -3384,16 +2854,16 @@ func handleToastushMigration(toastushDir string) error {
 	fmt.Printf("\nMigrating Toastush installation from: %s\n", toastushDir)
 
 	// Check if MUSHclient is running before we do anything
-	if isMUSHClientRunningInDir(toastushDir) {
+	if process.IsMUSHClientRunningInDir(toastushDir) {
 		if nonInteractive {
-			logProgress("MUSHclient is running. Killing MUSHclient before migration...")
+			console.Log("MUSHclient is running. Killing MUSHclient before migration...")
 			if err := exec.Command("taskkill", "/IM", "MUSHclient.exe", "/F").Run(); err != nil {
 				return fmt.Errorf("failed to kill MUSHclient: %w", err)
 			}
-			logProgress("MUSHclient killed successfully")
+			console.Log("MUSHclient killed successfully")
 			// Wait for process to fully terminate
-			if !waitForProcessToTerminate("MUSHclient.exe", 5*time.Second) {
-				logProgress("Warning: MUSHclient may not have fully terminated")
+			if !process.WaitForTermination("MUSHclient.exe", 5*time.Second) {
+				console.Log("Warning: MUSHclient may not have fully terminated")
 			}
 		} else {
 			fmt.Println("\nMUSHclient is currently running and will be closed to proceed with migration.")
@@ -3408,7 +2878,7 @@ func handleToastushMigration(toastushDir string) error {
 				}
 				fmt.Println("MUSHclient closed successfully.")
 				// Wait for process to fully terminate
-				if !waitForProcessToTerminate("MUSHclient.exe", 5*time.Second) {
+				if !process.WaitForTermination("MUSHclient.exe", 5*time.Second) {
 					fmt.Println("Warning: MUSHclient may not have fully terminated")
 				}
 			} else {
@@ -3514,7 +2984,7 @@ func handleToastushMigration(toastushDir string) error {
 	}
 
 	// Create channel switching batch files
-	if err := createChannelSwitchBatchFiles(toastushDir); err != nil {
+	if err := install.CreateChannelSwitchBatchFiles(toastushDir); err != nil {
 		fmt.Printf("Warning: failed to create channel switch batch files: %v\n", err)
 	}
 

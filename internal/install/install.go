@@ -63,22 +63,26 @@ func CreateChannelSwitchBatchFiles(installDir string) error {
 
 // IsInstalled checks if the current directory contains a valid installation
 func IsInstalled(baseDir string) bool {
-	hasMUSHclient := false
-	hasWorlds := false
-	hasManifest := false
-
-	if _, err := os.Stat(filepath.Join(baseDir, "MUSHclient.exe")); err == nil {
-		hasMUSHclient = true
-	} else if _, err := os.Stat(filepath.Join(baseDir, "mushclient.exe")); err == nil {
-		hasMUSHclient = true
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		return false
 	}
 
-	if info, err := os.Stat(filepath.Join(baseDir, "worlds")); err == nil && info.IsDir() {
-		hasWorlds = true
-	}
-
-	if _, err := os.Stat(filepath.Join(baseDir, ".manifest")); err == nil {
-		hasManifest = true
+	var hasMUSHclient, hasWorlds, hasManifest bool
+	for _, entry := range entries {
+		name := strings.ToLower(entry.Name())
+		switch {
+		case name == "mushclient.exe":
+			hasMUSHclient = true
+		case name == "worlds" && entry.IsDir():
+			hasWorlds = true
+		case name == ".manifest":
+			hasManifest = true
+		}
+		// Early exit if we have enough info
+		if hasMUSHclient && (hasWorlds || hasManifest) {
+			return true
+		}
 	}
 
 	return hasMUSHclient && (hasWorlds || hasManifest)

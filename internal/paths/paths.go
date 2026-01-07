@@ -17,6 +17,11 @@ func Denormalize(p string) string {
 	return strings.ReplaceAll(p, "/", string(filepath.Separator))
 }
 
+// CleanLower returns a cleaned, lowercase path for case-insensitive comparison
+func CleanLower(p string) string {
+	return strings.ToLower(filepath.Clean(p))
+}
+
 // FindActual finds the actual case of a file on case-insensitive filesystems
 func FindActual(targetPath string) (string, error) {
 	if _, err := os.Stat(targetPath); err == nil {

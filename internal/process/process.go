@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/distantorigin/next-launcher/internal/paths"
 )
 
 // IsNodeListeningOnPort checks if node.exe is running and listening on the specified port
@@ -46,8 +48,7 @@ func IsPortListening(port string) bool {
 
 // IsMUSHClientRunningInDir checks if MUSHclient.exe is running from the specified directory
 func IsMUSHClientRunningInDir(targetDir string) bool {
-	expectedPath := filepath.Join(targetDir, "MUSHclient.exe")
-	expectedPath = strings.ToLower(filepath.Clean(expectedPath))
+	expectedPath := paths.CleanLower(filepath.Join(targetDir, "MUSHclient.exe"))
 
 	// Use WMIC to get all running MUSHclient.exe processes with their full paths
 	cmd := exec.Command("wmic", "process", "where", "name='MUSHclient.exe'", "get", "ExecutablePath", "/format:list")
@@ -61,9 +62,7 @@ func IsMUSHClientRunningInDir(targetDir string) bool {
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "ExecutablePath=") {
-			processPath := strings.TrimPrefix(line, "ExecutablePath=")
-			processPath = strings.ToLower(filepath.Clean(processPath))
-
+			processPath := paths.CleanLower(strings.TrimPrefix(line, "ExecutablePath="))
 			if processPath == expectedPath {
 				return true
 			}
