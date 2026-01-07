@@ -1,0 +1,6 @@
+# Ignore embedded release files (placed here at build time)
+miriani-next.zip
+
+# Keep these files
+!.gitignore
+!README.md
