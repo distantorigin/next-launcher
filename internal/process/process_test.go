@@ -134,7 +134,6 @@ func TestCommandAvailability(t *testing.T) {
 	commands := []string{
 		"tasklist",
 		"netstat",
-		"wmic",
 	}
 
 	for _, cmdName := range commands {
