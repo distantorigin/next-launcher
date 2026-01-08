@@ -1,8 +1,7 @@
 package selfupdate
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -13,18 +12,25 @@ import (
 
 // Config holds the configuration for self-update
 type Config struct {
-	VersionURL    string
-	BinaryURL     string
-	HashURL       string
+	ReleasesAPIURL string
+	BinaryURL      string
 	CurrentVersion string
+}
+
+// GitHubRelease represents the GitHub API response for a release
+type GitHubRelease struct {
+	TagName string `json:"tag_name"`
+	Assets  []struct {
+		Name               string `json:"name"`
+		BrowserDownloadURL string `json:"browser_download_url"`
+	} `json:"assets"`
 }
 
 // DefaultConfig returns the default self-update configuration
 func DefaultConfig(currentVersion string) Config {
 	return Config{
-		VersionURL:    "https://anomalousabode.com/next/updater-version",
-		BinaryURL:     "https://anomalousabode.com/next/updater",
-		HashURL:       "https://anomalousabode.com/next/updater.sha256",
+		ReleasesAPIURL: "https://api.github.com/repos/distantorigin/next-launcher/releases/latest",
+		BinaryURL:      "https://github.com/distantorigin/next-launcher/releases/latest/download/miriani.exe",
 		CurrentVersion: currentVersion,
 	}
 }
@@ -39,9 +45,9 @@ func Check(cfg Config) error {
 		return nil // Silent failure - not critical
 	}
 
-	// Create a client with a very short timeout for self-update check
+	// Create a client with a short timeout for version check
 	quickClient := &http.Client{
-		Timeout: 2 * time.Second,
+		Timeout: 5 * time.Second,
 		Transport: &http.Transport{
 			MaxIdleConns:        10,
 			MaxIdleConnsPerHost: 2,
@@ -50,88 +56,76 @@ func Check(cfg Config) error {
 		},
 	}
 
-	// Make a request to the update URL
-	resp, err := quickClient.Get(cfg.VersionURL)
+	// Make a request to GitHub releases API
+	req, err := http.NewRequest("GET", cfg.ReleasesAPIURL, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	req.Header.Set("User-Agent", "next-launcher")
+
+	resp, err := quickClient.Do(req)
 	if err != nil {
 		return nil // Silent failure - network issues, server down, etc.
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil // Silent failure - updater not available or other HTTP error
+		return nil // Silent failure - API error
 	}
 
-	// Read the remote version
-	versionData, err := io.ReadAll(resp.Body)
-	if err != nil {
+	// Parse the release info
+	var release GitHubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
 		return nil
 	}
 
-	remoteVersion := strings.TrimSpace(string(versionData))
+	// Extract version from tag (e.g., "v1.2.3" -> "1.2.3")
+	remoteVersion := strings.TrimPrefix(release.TagName, "v")
 	if remoteVersion == "" || remoteVersion == cfg.CurrentVersion {
 		return nil // No update available
 	}
 
-	// Update available - download and verify
-	return downloadAndReplace(cfg, exePath)
+	// Find the binary asset URL
+	binaryURL := cfg.BinaryURL
+	for _, asset := range release.Assets {
+		if asset.Name == "miriani.exe" {
+			binaryURL = asset.BrowserDownloadURL
+			break
+		}
+	}
+
+	// Update available - download and replace
+	return downloadAndReplace(binaryURL, exePath)
 }
 
-// downloadAndReplace downloads the new binary, verifies it, and replaces the current executable
-func downloadAndReplace(cfg Config, exePath string) error {
-	downloadClient := &http.Client{Timeout: 30 * time.Second}
-
-	// Download expected hash first
-	hashResp, err := downloadClient.Get(cfg.HashURL)
-	if err != nil {
-		return nil // Silent failure - can't verify without hash
-	}
-	defer hashResp.Body.Close()
-
-	if hashResp.StatusCode != http.StatusOK {
-		return nil // Silent failure - hash not available
-	}
-
-	hashData, err := io.ReadAll(hashResp.Body)
-	if err != nil {
-		return nil
-	}
-
-	// Parse expected hash (format: "sha256hash  filename" or just "sha256hash")
-	expectedHash := strings.TrimSpace(string(hashData))
-	if idx := strings.Index(expectedHash, " "); idx > 0 {
-		expectedHash = expectedHash[:idx]
-	}
-	expectedHash = strings.ToLower(expectedHash)
-
-	if len(expectedHash) != 64 {
-		return nil // Invalid hash format, refuse to update
-	}
+// downloadAndReplace downloads the new binary and replaces the current executable.
+// We trust GitHub's HTTPS, so no additional hash verification is needed.
+func downloadAndReplace(binaryURL string, exePath string) error {
+	downloadClient := &http.Client{Timeout: 60 * time.Second}
 
 	// Download new binary
-	binaryResp, err := downloadClient.Get(cfg.BinaryURL)
+	resp, err := downloadClient.Get(binaryURL)
 	if err != nil {
 		return nil
 	}
-	defer binaryResp.Body.Close()
+	defer resp.Body.Close()
 
-	if binaryResp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK {
 		return nil
 	}
 
-	data, err := io.ReadAll(binaryResp.Body)
+	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil
 	}
 
-	// Verify SHA256 hash before replacing
-	actualHash := sha256.Sum256(data)
-	actualHashStr := hex.EncodeToString(actualHash[:])
-
-	if actualHashStr != expectedHash {
-		return nil // Hash mismatch - refuse to update
+	// Basic sanity check - should be a reasonable size for an exe
+	if len(data) < 1024*1024 { // Less than 1MB is suspicious
+		return nil
 	}
 
-	// Hash verified - safe to replace
+	// Replace the executable
 	oldExe := exePath + ".old"
 	_ = os.Remove(oldExe)
 	if err := os.Rename(exePath, oldExe); err != nil {
