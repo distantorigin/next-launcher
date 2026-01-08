@@ -1971,7 +1971,7 @@ func handleInstallation() (string, error) {
 	embeddedVersion := ""
 	if hasEmbedded {
 		embeddedVersion = embedded.GetVersion()
-		fmt.Printf("\nOffline installer - installing v%s\n", embeddedVersion)
+		fmt.Printf("\nInstalling v%s\n", embeddedVersion)
 	}
 
 	// If no channel was explicitly set, prompt for selection during fresh install
@@ -3038,12 +3038,12 @@ func createDesktopIcon(targetDir string) error {
 // installFromEmbedded installs using embedded release data (offline installer).
 // The embedded ZIP should contain .manifest and version.json from the release.
 func installFromEmbedded(installDir string, embeddedVersion string) (string, error) {
-	if !quietFlag {
-		fmt.Printf("\nInstalling from embedded files (v%s)...\n", embeddedVersion)
-	}
-
 	// Play installation sound
 	playSound(installingSound)
+
+	if !quietFlag {
+		fmt.Println("Extracting files...")
+	}
 
 	// Extract embedded files (includes .manifest and version.json if present)
 	total := 0
@@ -3127,9 +3127,6 @@ func installFromEmbedded(installDir string, embeddedVersion string) (string, err
 	}
 
 	// Download slim updater to replace the fat offline installer
-	if !quietFlag {
-		fmt.Println("Downloading updater...")
-	}
 	if err := downloadSlimUpdater(installDir); err != nil {
 		fmt.Printf("Warning: failed to download updater: %v\n", err)
 		fmt.Println("You can manually download it from: https://github.com/distantorigin/next-launcher/releases")
@@ -3172,10 +3169,44 @@ func downloadSlimUpdater(installDir string) error {
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath) // Clean up on error
 
-	_, err = io.Copy(tmpFile, resp.Body)
+	// Copy with progress
+	totalSize := resp.ContentLength
+	written := int64(0)
+	buf := make([]byte, 32*1024)
+	lastPercent := -1
+
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			_, writeErr := tmpFile.Write(buf[:n])
+			if writeErr != nil {
+				tmpFile.Close()
+				return fmt.Errorf("failed to write file: %w", writeErr)
+			}
+			written += int64(n)
+
+			// Show progress
+			if totalSize > 0 && !quietFlag {
+				percent := int(written * 100 / totalSize)
+				if percent != lastPercent {
+					console.SetTitle(fmt.Sprintf("%s - Downloading updater: %d%%", title, percent))
+					fmt.Printf("\rDownloading updater: %d%%    ", percent)
+					lastPercent = percent
+				}
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			tmpFile.Close()
+			return fmt.Errorf("failed to read response: %w", readErr)
+		}
+	}
 	tmpFile.Close()
-	if err != nil {
-		return fmt.Errorf("failed to write file: %w", err)
+
+	if !quietFlag {
+		fmt.Printf("\n")
 	}
 
 	// Rename to final location

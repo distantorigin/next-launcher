@@ -10,7 +10,7 @@ A Windows-based auto-updater and launcher for the Miriani-Next scripts. This upd
 - **Audio Feedback** - Optional sound effects for download, installation, and error states
 - **Self-Updating** - The updater can update itself
 - **Migration Support** - Seamless migration from legacy Toastush installations
-- **Process Management** - Detects and manages MUSHclient instances during updates
+- **Process Management** - Detects and manages MUSHclient instances during updates, giving the option for restarts
 - **Non-Interactive Mode** - Silent operation for automated workflows
 
 ## System Requirements
@@ -18,14 +18,14 @@ A Windows-based auto-updater and launcher for the Miriani-Next scripts. This upd
 - **Operating System**: Windows 10 or later
 - **Runtime**: No external dependencies (standalone executable)
 - **Storage**: ~50-100 MB for full installation
-- **Network**: Internet connection for updates
+- **Network**: Internet connection for updates, if not using an offline version
 
 ## Installation
 
 ### Fresh Installation
 
-1. Download `updater.exe` from the latest release
-2. Run `updater.exe` from any location
+1. Download `miriani.exe` from the latest release
+2. Run the file from any location
 3. Follow the interactive prompts to:
    - Choose installation directory (default: `%USERPROFILE%\Documents\Miriani-Next`)
    - Select update channel (stable or dev)
@@ -39,7 +39,7 @@ The updater will automatically:
 
 ### Updating Existing Installation
 
-Simply run `updater.exe` from your installation directory. The updater will:
+Simply run `update.exe` from your installation directory. The updater will:
 - Check for updates on your current channel
 - Download and apply changes
 - Display a changelog of updates
@@ -51,14 +51,14 @@ Simply run `updater.exe` from your installation directory. The updater will:
 
 ```bash
 # Update current installation
-updater.exe
+update.exe
 
 # Check for updates without applying
-updater.exe check
+update check
 
 # Switch update channels
-updater.exe switch stable
-updater.exe switch dev
+update switch stable
+update switch dev
 ```
 
 ### Command-Line Flags
@@ -77,13 +77,13 @@ updater.exe switch dev
 
 ```bash
 # Silent update with detailed logging
-updater.exe -quiet -verbose -non-interactive
+update -quiet -verbose -non-interactive
 
 # Switch to dev channel and update
-updater.exe -channel dev
+update -channel dev
 
 # Check for updates on a specific branch
-updater.exe check -channel feature/new-ui
+update check -channel feature/new-ui
 ```
 
 ## Update Channels
@@ -97,7 +97,7 @@ The updater supports three types of channels:
 ### Switching Channels
 
 You can switch channels using:
-1. Command line: `updater.exe switch <channel>`
+1. Command line: `update switch <channel>`
 2. Batch files (generated in installation directory):
    - `Switch to Stable.bat`
    - `Switch to Dev.bat`
@@ -179,7 +179,7 @@ cd miriani-next
 build.bat 1.0.0
 
 # Or use Go directly
-go build -trimpath -ldflags="-s -w -X main.version=1.0.0" -o updater.exe
+go build -trimpath -ldflags="-s -w -X main.version=1.0.0" -o update
 ```
 
 ### Build Flags
@@ -248,7 +248,7 @@ All file operations validate paths to prevent directory traversal attacks:
 
 **"Failed to download file"**
 - Check internet connection
-- Verify firewall isn't blocking updater.exe
+- Verify firewall isn't blocking update
 - Check GitHub API rate limits (60 requests/hour for unauthenticated)
 
 **"Manifest file is corrupted"**
@@ -256,7 +256,7 @@ All file operations validate paths to prevent directory traversal attacks:
 - Run updater again to regenerate manifest
 
 **Updates not appearing**
-- Verify you're on the correct channel: `updater.exe check -verbose`
+- Verify you're on the correct channel: `update check -verbose`
 - Check if channel has newer commits: visit GitHub repository
 
 ### Debug Mode
@@ -264,7 +264,7 @@ All file operations validate paths to prevent directory traversal attacks:
 Run with `-verbose` flag for detailed operation logs:
 
 ```bash
-updater.exe -verbose
+update -verbose
 ```
 
 ### Non-Interactive Results
@@ -280,17 +280,6 @@ When running with `-non-interactive`, results are written to `.update-result`:
 }
 ```
 
-## Contributing
-
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-### Development Setup
-
-1. Install Go 1.24.0 or later
-2. Clone the repository
-3. Run `go mod download` to fetch dependencies
-4. Build with `build.bat` or `go build`
-
 ### Testing
 
 ```bash
@@ -304,23 +293,6 @@ go test -cover ./...
 go test -race ./...
 ```
 
-## License
-
-[License information to be added]
-
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md) for version history and release notes.
-
-## Support
-
-- **Issues**: Report bugs at [GitHub Issues](https://github.com/distantorigin/miriani-next/issues)
-- **Game Support**: Visit [Miriani website](https://www.toastsoft.net)
-
-## Authors
-
-Miriani-Next development team
-
 ---
 
-**Note**: This updater is specifically designed for the Miriani-Next MUSHclient application and is not a general-purpose updater.
+**Note**: This updater is specifically designed for the Miriani-Next MUSHclient application and is not a general-purpose updater. (Yet!)
