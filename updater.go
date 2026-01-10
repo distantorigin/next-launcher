@@ -3038,8 +3038,8 @@ func createDesktopIcon(targetDir string) error {
 // installFromEmbedded installs using embedded release data (offline installer).
 // The embedded ZIP should contain .manifest and version.json from the release.
 func installFromEmbedded(installDir string, embeddedVersion string) (string, error) {
-	// Play installation sound
-	playSound(installingSound)
+	// Play installation sound asynchronously so it doesn't block extraction
+	playSoundAsyncLoop(installingSound, -1.5, true)
 
 	if !quietFlag {
 		fmt.Println("Extracting files...")
@@ -3143,12 +3143,12 @@ func installFromEmbedded(installDir string, embeddedVersion string) (string, err
 	return installDir, nil
 }
 
-// downloadSlimUpdater downloads miriani.exe from GitHub releases and saves as updater.exe.
+// downloadSlimUpdater downloads miriani.exe from GitHub releases and saves as update.exe.
 // This replaces the fat offline installer with the slim updater for future updates.
 func downloadSlimUpdater(installDir string) error {
 	// GitHub releases URL for latest updater
 	updaterURL := "https://github.com/distantorigin/next-launcher/releases/latest/download/miriani.exe"
-	targetPath := filepath.Join(installDir, "updater.exe")
+	targetPath := filepath.Join(installDir, "update.exe")
 
 	// Download to temp file first
 	resp, err := http.Get(updaterURL)
