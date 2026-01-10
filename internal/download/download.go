@@ -21,6 +21,7 @@ func File(url, targetPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
+	req.NoResume = true // Always overwrite, never resume
 
 	resp := client.Do(req)
 	if err := resp.Err(); err != nil {
@@ -36,6 +37,7 @@ func FileWithProgress(url, targetPath string, callback ProgressCallback) error {
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
+	req.NoResume = true // Always overwrite, never resume
 
 	resp := client.Do(req)
 

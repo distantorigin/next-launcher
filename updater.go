@@ -1552,8 +1552,9 @@ func downloadFile(info manifest.FileInfo) error {
 	if err != nil {
 		return fmt.Errorf("failed to create request for %s: %w", info.Name, err)
 	}
+	req.NoResume = true // Always overwrite, never resume
 
-	// Download with retry (grab handles retries and resume automatically)
+	// Download with retry
 	resp := grabClient.Do(req)
 
 	// Wait for completion
@@ -1589,6 +1590,7 @@ func downloadAndExtractZip(zipURL string, targetDir string, isInstall bool, file
 	if err != nil {
 		return fmt.Errorf("failed to create download request: %w", err)
 	}
+	req.NoResume = true // Always overwrite, never resume
 
 	// Start download
 	resp := grabClient.Do(req)
