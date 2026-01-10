@@ -1,5 +1,7 @@
 package main
 
+//go:generate go run github.com/akavel/rsrc@latest -manifest app.manifest -o rsrc.syso
+
 import (
 	"archive/zip"
 	"crypto/sha1"

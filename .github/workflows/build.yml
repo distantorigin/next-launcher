@@ -27,6 +27,9 @@ jobs:
         id: version
         run: echo "VERSION=$("${{ github.ref_name }}".TrimStart('v'))" >> $env:GITHUB_OUTPUT
 
+      - name: Generate Windows resources (manifest)
+        run: go generate
+
       - name: Build
         run: go build -ldflags="-s -w -X main.appVersion=${{ steps.version.outputs.VERSION }}" -o miriani.exe
 
