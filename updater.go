@@ -107,7 +107,7 @@ import (
 //     - handleToastushMigration
 //
 // 16. MISCELLANEOUS
-//     - needsToUpdateMUSHClientExe, launchMUSHClient, fatalError,
+//     - needsMUSHClientRestart, launchMUSHClient, fatalError,
 //       createUpdaterExcludes, writeUpdateSuccess
 //
 // 17. MAIN
@@ -1157,7 +1157,7 @@ func main() {
 	// Track whether we killed MUSHclient so we know to restart it later
 	// Only set to true if we actually kill the process
 	mushWasRunning := false
-	restartRequired := needsToUpdateMUSHClientExe(updates)
+	restartRequired := needsMUSHClientRestart(updates)
 
 	// In non-interactive mode, check if restart is required without allow-restart flag
 	if nonInteractive && restartRequired && !allowRestartFlag {
@@ -1359,7 +1359,7 @@ func getPendingUpdates() ([]manifest.FileInfo, []string, error) {
 func printCheckOutput(updates []manifest.FileInfo, deletedFiles []string) {
 	hasUpdates := len(updates) > 0 || len(deletedFiles) > 0
 	totalChanges := len(updates) + len(deletedFiles)
-	restartRequired := needsToUpdateMUSHClientExe(updates)
+	restartRequired := needsMUSHClientRestart(updates)
 
 	// Get version information
 	latestVer, err := getLatestVersion()
@@ -2324,9 +2324,10 @@ func hasWorldFilesInCurrentDir() bool {
 // SECTION 16: MISCELLANEOUS
 // ============================================================================
 
-func needsToUpdateMUSHClientExe(updates []manifest.FileInfo) bool {
+func needsMUSHClientRestart(updates []manifest.FileInfo) bool {
 	for _, file := range updates {
-		if strings.ToLower(file.Name) == "mushclient.exe" {
+		lowerName := strings.ToLower(file.Name)
+		if lowerName == "mushclient.exe" || strings.HasSuffix(lowerName, ".dll") {
 			return true
 		}
 	}
